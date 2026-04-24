@@ -23,7 +23,7 @@ blueprint:
     match the Grid Import Guard's `last_guard_trim`. Home Assistant
     does not share state between blueprint instances; mismatches
     fail silently.
-    
+
 
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
@@ -403,9 +403,9 @@ action:
       flag_on: "{{ is_state(below_min_flag, 'on') }}"
       seconds_since_guard_trim: >
         {% if last_guard_trim %}
-          {% set ts = states(last_guard_trim) %}
-          {% if ts and ts | lower not in ['unknown', 'unavailable', 'none', ''] %}
-            {{ (now() - as_datetime(ts)).total_seconds() }}
+          {% set ts = state_attr(last_guard_trim, 'timestamp') %}
+          {% if ts is not none %}
+            {{ now().timestamp() - (ts | float(0)) }}
           {% else %}
             99999
           {% endif %}
