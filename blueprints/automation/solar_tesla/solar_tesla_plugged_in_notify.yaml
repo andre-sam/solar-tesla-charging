@@ -16,7 +16,10 @@ blueprint:
     NOTE: the charging window (`window_start`/`window_end`) is shown
     in notifications only — it does NOT gate charging here. Keep
     these times in sync with the Controller blueprint's window if
-    you change them, otherwise the messages will be misleading.
+    you change them. There is no enforcement: if they drift, the
+    notifications will display the wrong window times but charging
+    behaviour is unaffected (the Controller remains the sole gate on
+    when sessions can start).
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_plugged_in_notify.yaml
   input:
