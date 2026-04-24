@@ -216,8 +216,7 @@ blueprint:
       selector:
         time:
 
-mode: queued
-max: 1
+mode: single
 max_exceeded: silent
 
 variables:
