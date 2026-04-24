@@ -7,9 +7,11 @@ blueprint:
     export has been below the minimum charge current continuously),
     this blueprint ends the session.
 
+
     This is separated from the main Controller so the Controller stays
     responsive during the grace window — the moment export recovers,
     the Controller clears the flag and this automation's timer aborts.
+
 
     IMPORTANT — shared inputs: the `below_min_flag`, `enable_toggle`,
     `contactor_closed` and `charge_switch` entities MUST be the exact
@@ -17,6 +19,7 @@ blueprint:
     not share state between blueprint instances, so mismatches fail
     silently (the session simply never ends on low solar).
     
+
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_grace_stop.yaml
   input:

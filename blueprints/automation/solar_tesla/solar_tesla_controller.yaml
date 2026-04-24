@@ -6,6 +6,7 @@ blueprint:
     stop/start, and is the single source of truth for stop decisions
     (SOC cap, optional hard window-end stop, below-minimum tracking).
 
+
     This version delegates the grace-period stop to a separate
     "Grace Stop" companion blueprint via a shared input_boolean
     ("below-minimum" flag). The Controller only toggles the flag; the
@@ -23,6 +24,7 @@ blueprint:
     does not share state between blueprint instances; mismatches
     fail silently.
     
+
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
   input:

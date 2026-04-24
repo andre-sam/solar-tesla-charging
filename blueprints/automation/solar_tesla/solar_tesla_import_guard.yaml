@@ -6,11 +6,13 @@ blueprint:
     Pairs with the "Solar Tesla Charging — Controller" blueprint, which
     is the single place a stop decision is taken.
 
+
     Can optionally stamp an input_datetime on every trim. When the
     Controller is configured to read that same input_datetime, it
     skips its stability delay for ramp-ups that happen shortly after a
     trim — so a brief import spike (kettle, microwave) doesn't pin
     charging at reduced current for a full stability delay.
+
 
     IMPORTANT — shared inputs: `enable_toggle`, `contactor_closed`
     and `charge_current_number` must match the Controller exactly.
@@ -18,6 +20,8 @@ blueprint:
     input_datetime configured on the Controller's
     "Last Import Guard trim timestamp" input. Mismatches fail
     silently.
+
+    
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_import_guard.yaml
   input:
