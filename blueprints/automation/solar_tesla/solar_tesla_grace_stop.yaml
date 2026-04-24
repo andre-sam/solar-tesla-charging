@@ -1,0 +1,117 @@
+blueprint:
+  name: Solar Tesla Charging — Grace Stop
+  description: >
+    Companion to the "Solar Tesla Charging — Controller" blueprint.
+    Watches the below-minimum flag the Controller maintains: if the
+    flag stays ON for the configured grace period (meaning solar
+    export has been below the minimum charge current continuously),
+    this blueprint ends the session.
+
+    This is separated from the main Controller so the Controller stays
+    responsive during the grace window — the moment export recovers,
+    the Controller clears the flag and this automation's timer aborts.
+  domain: automation
+  source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_grace_stop.yaml
+  input:
+    enable_toggle:
+      name: Master enable toggle
+      selector:
+        entity:
+          domain: input_boolean
+
+    below_min_flag:
+      name: Below-minimum tracker (input_boolean)
+      description: >
+        Same input_boolean configured in the Controller blueprint.
+      selector:
+        entity:
+          domain: input_boolean
+
+    contactor_closed:
+      name: Contactor closed binary sensor
+      selector:
+        entity:
+          domain: binary_sensor
+
+    charge_switch:
+      name: Tesla charge on/off switch
+      selector:
+        entity:
+          domain: switch
+
+    battery_soc:
+      name: Tesla battery SOC sensor (optional, for notification)
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    stop_grace_seconds:
+      name: Stop grace at minimum (s)
+      description: >
+        Hold at minimum amps this long before ending the session. If
+        solar recovers during this window (Controller clears the flag)
+        the timer aborts and no stop happens.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 900
+          step: 30
+          unit_of_measurement: s
+
+    notify_service:
+      name: Notify service (optional)
+      description: e.g. notify.mobile_app_phone. Blank disables notifications.
+      default: ""
+      selector:
+        text:
+
+mode: single
+max_exceeded: silent
+
+variables:
+  enable_toggle: !input enable_toggle
+  below_min_flag: !input below_min_flag
+  contactor_closed: !input contactor_closed
+  battery_soc: !input battery_soc
+  stop_grace_seconds: !input stop_grace_seconds
+  notify_service: !input notify_service
+
+trigger:
+  - platform: state
+    entity_id: !input below_min_flag
+    to: "on"
+    for:
+      seconds: !input stop_grace_seconds
+
+condition:
+  - condition: state
+    entity_id: !input enable_toggle
+    state: "on"
+  - condition: state
+    entity_id: !input below_min_flag
+    state: "on"
+  - condition: state
+    entity_id: !input contactor_closed
+    state: "on"
+
+action:
+  - service: switch.turn_off
+    target:
+      entity_id: !input charge_switch
+  - service: input_boolean.turn_off
+    target:
+      entity_id: !input below_min_flag
+  - if:
+      - condition: template
+        value_template: "{{ notify_service | length > 0 }}"
+    then:
+      - service: "{{ notify_service }}"
+        data:
+          title: "☁️ Solar Session Ended"
+          message: >
+            Solar export stayed below minimum for
+            {{ (stop_grace_seconds | int // 60) }} min.
+            Charging stopped{% if battery_soc %} at
+            {{ states(battery_soc) | round(0) }}%{% endif %}.

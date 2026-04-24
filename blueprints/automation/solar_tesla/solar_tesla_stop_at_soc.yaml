@@ -1,6 +1,11 @@
 blueprint:
-  name: Solar Tesla Charging — Stop at Max SOC
+  name: Solar Tesla Charging — Stop at Max SOC (deprecated)
   description: >
+    DEPRECATED. The Controller blueprint now handles the SOC cap stop
+    itself (with optional notification) so there is a single source of
+    truth for why charging stopped. This blueprint is kept for users
+    who have already imported it; new installs should leave it out.
+
     Stops the Tesla charge switch once the battery reaches the lower of
     the configured cap and the Tesla car-side charge limit.
   domain: automation

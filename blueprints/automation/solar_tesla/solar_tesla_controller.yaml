@@ -3,17 +3,37 @@ blueprint:
   description: >
     Ramp-first solar-aware Tesla charging controller. Adjusts the Tesla
     charge current based on measured grid export, prefers ramping over
-    stop/start, and only ends a session after a sustained grace period
-    at minimum amps.
+    stop/start, and is the single source of truth for stop decisions
+    (SOC cap, optional hard window-end stop, below-minimum tracking).
 
-    Pair with the "Grid Import Guard" blueprint for instant response to
-    grid-import events.
+    This version delegates the grace-period stop to a separate
+    "Grace Stop" companion blueprint via a shared input_boolean
+    ("below-minimum" flag). The Controller only toggles the flag; the
+    companion runs the timer. This keeps the Controller responsive to
+    recovery the moment export climbs back above the minimum.
+
+    Pair with:
+      - "Solar Tesla Charging — Grace Stop" (required for session ending)
+      - "Solar Tesla Charging — Grid Import Guard" (optional)
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
   input:
     enable_toggle:
       name: Master enable toggle
       description: input_boolean you create to enable/disable solar charging.
+      selector:
+        entity:
+          domain: input_boolean
+
+    below_min_flag:
+      name: Below-minimum tracker (input_boolean)
+      description: >
+        Second input_boolean you create (e.g.
+        input_boolean.solar_charging_below_min). The Controller turns
+        this ON while export is below the minimum charge current and
+        OFF as soon as export recovers or the session ends. The
+        companion "Grace Stop" blueprint watches this flag to end the
+        session after the grace period.
       selector:
         entity:
           domain: input_boolean
@@ -100,12 +120,41 @@ blueprint:
 
     wake_button:
       name: Tesla wake-up button (optional)
-      description: button.* pressed before starting charging. Leave empty
-        to skip.
+      description: >
+        button.* pressed before starting or resuming charging. Leave
+        empty to skip. When provided, it is pressed whenever a restart
+        is attempted, including when the car's status is ambiguous
+        (unknown/unavailable/asleep), which would otherwise block
+        resume.
       default: ""
       selector:
         entity:
           domain: button
+
+    last_guard_trim:
+      name: Last Import Guard trim timestamp (optional)
+      description: >
+        input_datetime (with date + time) updated by the Grid Import
+        Guard blueprint each time it trims current. When present, the
+        Controller skips the stability delay for ramp-up steps that
+        happen within the "fast recovery" window below, so recovery
+        from a brief import spike (kettle, microwave) isn't held back
+        for a full stability delay. Leave empty to disable.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
+
+    notify_service:
+      name: Notify service (optional)
+      description: >
+        e.g. notify.mobile_app_phone. Blank disables notifications.
+        Used for SOC-cap stops and hard window-end stops. Solar-
+        exhaustion stops are notified from the companion Grace Stop
+        blueprint.
+      default: ""
+      selector:
+        text:
 
     line_voltage:
       name: Line voltage (V)
@@ -193,16 +242,30 @@ blueprint:
           step: 5
           unit_of_measurement: s
 
-    stop_grace_seconds:
-      name: Stop grace at minimum (s)
-      description: Hold at min amps this long before ending the session.
+    post_trim_fast_recovery_seconds:
+      name: Post-trim fast-recovery window (s)
+      description: >
+        Only used when "Last Import Guard trim timestamp" is set. If a
+        ramp-up happens within this many seconds of the last Guard
+        trim, the stability delay is skipped so the session recovers
+        quickly from a brief import spike.
       default: 180
       selector:
         number:
-          min: 30
-          max: 900
+          min: 0
+          max: 600
           step: 30
           unit_of_measurement: s
+
+    hard_stop_at_window_end:
+      name: Hard-stop running session at window end
+      description: >
+        When off (default), a session that started inside the window is
+        allowed to run past window_end. When on, the Controller ends
+        the session as soon as the window closes.
+      default: false
+      selector:
+        boolean:
 
     window_start:
       name: Charging window start
@@ -220,8 +283,8 @@ mode: single
 max_exceeded: silent
 
 variables:
-  # Re-expose inputs as template-visible variables.
   enable_toggle: !input enable_toggle
+  below_min_flag: !input below_min_flag
   grid_export_power_negative: !input grid_export_power_negative
   grid_import_power: !input grid_import_power
   wall_connector_power: !input wall_connector_power
@@ -233,6 +296,8 @@ variables:
   battery_soc: !input battery_soc
   charge_limit_number: !input charge_limit_number
   wake_button: !input wake_button
+  last_guard_trim: !input last_guard_trim
+  notify_service: !input notify_service
   line_voltage: !input line_voltage
   phase_count: !input phase_count
   export_threshold_amps: !input export_threshold_amps
@@ -241,7 +306,8 @@ variables:
   restart_hysteresis_amps: !input restart_hysteresis_amps
   max_soc: !input max_soc
   stability_delay_seconds: !input stability_delay_seconds
-  stop_grace_seconds: !input stop_grace_seconds
+  post_trim_fast_recovery_seconds: !input post_trim_fast_recovery_seconds
+  hard_stop_at_window_end: !input hard_stop_at_window_end
   window_start: !input window_start
   window_end: !input window_end
 
@@ -264,6 +330,8 @@ trigger:
     entity_id: !input battery_soc
   - platform: state
     entity_id: !input wall_connector_power
+  - platform: state
+    entity_id: !input charge_current_number
 
 condition:
   - condition: state
@@ -295,13 +363,11 @@ action:
         {{ -((states(grid_import_power) | float(0))
              + (states(grid_export_power_negative) | float(0))) }}
       effective_export_w: "{{ grid_export_w + wall_power_w }}"
-      # Convert to per-line amps minus buffer.
       effective_export_a: >
         {{ (effective_export_w / line_voltage) if effective_export_w > 0 else 0 }}
       available_amps: >
         {% set a = (effective_export_a / phase_count) - export_threshold_amps %}
         {{ [[a, 0] | max, max_charge_amps_cfg] | min | round(1) }}
-      # Min floor: trust user helper down to 1 A.
       min_charge_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
       max_charge_amps: >
         {{ [[state_attr(charge_current_number, 'max') | float(max_charge_amps_cfg),
@@ -310,6 +376,10 @@ action:
       restart_charge_amps: "{{ min_charge_amps + restart_hysteresis_amps }}"
       current_set_amps: "{{ states(charge_current_number) | float(0) }}"
       status_text: "{{ states(wall_connector_status) | lower }}"
+      # Blocking statuses that prevent a restart attempt. 'unknown',
+      # 'unavailable' and 'asleep' are deliberately NOT blockers — we
+      # try to wake the car instead.
+      blocking_statuses: "{{ ['fault', 'faulted', 'error', 'offline'] }}"
       soc: "{{ states(battery_soc) | float(0) }}"
       tesla_limit: >
         {% if charge_limit_number %}
@@ -320,8 +390,71 @@ action:
       effective_limit: "{{ [max_soc, tesla_limit] | min }}"
       now_time: "{{ now().strftime('%H:%M:%S') }}"
       window_open: "{{ window_start <= now_time < window_end }}"
+      flag_on: "{{ is_state(below_min_flag, 'on') }}"
+      seconds_since_guard_trim: >
+        {% if last_guard_trim %}
+          {% set ts = states(last_guard_trim) %}
+          {% if ts and ts | lower not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ (now() - as_datetime(ts)).total_seconds() }}
+          {% else %}
+            99999
+          {% endif %}
+        {% else %}
+          99999
+        {% endif %}
+      guard_trim_recent: "{{ seconds_since_guard_trim | float(99999) < post_trim_fast_recovery_seconds }}"
   - choose:
-      # ── Branch 1: solar below minimum — hold at min, stop after grace ──
+      # ── Branch 1: SOC cap reached ─────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ is_state(contactor_closed, 'on') and soc >= effective_limit }}
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input charge_switch
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input below_min_flag
+          - if:
+              - condition: template
+                value_template: "{{ notify_service | length > 0 }}"
+            then:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "🔋 Tesla Fully Charged (Solar)"
+                  message: >
+                    Tesla reached {{ soc | round(0) }}% (limit {{ effective_limit | round(0) }}%).
+                    Solar charging stopped.
+
+      # ── Branch 2: Hard stop at window end (optional) ──────────────
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ hard_stop_at_window_end
+                 and is_state(contactor_closed, 'on')
+                 and not window_open }}
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input charge_switch
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input below_min_flag
+          - if:
+              - condition: template
+                value_template: "{{ notify_service | length > 0 }}"
+            then:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "⏱️ Solar Window Closed"
+                  message: >
+                    Charging window ended ({{ window_start }}–{{ window_end }}).
+                    Solar session stopped at {{ soc | round(0) }}%.
+
+      # ── Branch 3: Below minimum — hold at min, raise flag ─────────
+      # The companion "Grace Stop" blueprint will end the session if
+      # this flag stays on for the configured grace period.
       - conditions:
           - condition: template
             value_template: >
@@ -337,33 +470,34 @@ action:
                   entity_id: !input charge_current_number
                 data:
                   value: "{{ min_charge_amps | round(0) | int }}"
-          - delay:
-              seconds: "{{ stop_grace_seconds }}"
-          # Re-read export power fresh (not the captured available_amps),
-          # so a cloud gap that clears during the grace window aborts the
-          # stop. Duplicates the effective-export math above on purpose.
+          - if:
+              - condition: template
+                value_template: "{{ not flag_on }}"
+            then:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: !input below_min_flag
+
+      # ── Branch 4: Recovered from below-minimum — clear flag ──────
+      - conditions:
           - condition: template
             value_template: >
-              {{ is_state(contactor_closed, 'on')
-                 and ((( -((states(grid_import_power) | float(0))
-                           + (states(grid_export_power_negative) | float(0))) ) +
-                       ((states(wall_connector_power) | float(0)) *
-                        (1000 if 'kw' in (state_attr(wall_connector_power,
-                         'unit_of_measurement') | default('W', true) | lower)
-                         else 1))) / line_voltage / phase_count
-                      - export_threshold_amps) < min_charge_amps }}
-          - service: switch.turn_off
+              {{ flag_on
+                 and (is_state(contactor_closed, 'off')
+                      or available_amps >= min_charge_amps) }}
+        sequence:
+          - service: input_boolean.turn_off
             target:
-              entity_id: !input charge_switch
+              entity_id: !input below_min_flag
 
-      # ── Branch 2: start / resume ──
+      # ── Branch 5: Start / resume ──────────────────────────────────
       - conditions:
           - condition: template
             value_template: >
               {{ is_state(contactor_closed, 'off')
                  and window_open
                  and is_state(vehicle_connected, 'on')
-                 and status_text not in ['fault', 'faulted', 'error', 'offline', 'unknown', 'unavailable']
+                 and status_text not in blocking_statuses
                  and available_amps >= restart_charge_amps
                  and soc < effective_limit }}
         sequence:
@@ -371,6 +505,9 @@ action:
               target_amps: >
                 {% set raw = [[available_amps, max_charge_amps] | min, min_charge_amps] | max %}
                 {{ raw | round(0, 'floor') | int }}
+          # Always try to wake the car on a restart if a wake button is
+          # provided — covers the case where status is ambiguous
+          # (unknown/unavailable/asleep) after a mid-session sleep.
           - if:
               - condition: template
                 value_template: "{{ wake_button | length > 0 }}"
@@ -390,11 +527,13 @@ action:
           - service: switch.turn_on
             target:
               entity_id: !input charge_switch
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input below_min_flag
 
-      # ── Branch 3: adjust while charging ──
-      # No window_open check here on purpose: once a session is running
-      # we let it finish rather than freezing current at window_end.
-      # Branch 1 (below-min export) takes precedence over this branch.
+      # ── Branch 6: Adjust while charging ───────────────────────────
+      # No window_open check here unless hard_stop_at_window_end is on
+      # (Branch 2 handles that case). Branches 1 and 3 take precedence.
       - conditions:
           - condition: template
             value_template: >
@@ -421,9 +560,11 @@ action:
                   entity_id: !input charge_current_number
                 data:
                   value: "{{ target_amps }}"
+              # Skip stability delay during the post-trim fast-recovery
+              # window so brief import spikes don't pin us low.
               - if:
                   - condition: template
-                    value_template: "{{ is_ramp_up }}"
+                    value_template: "{{ is_ramp_up and not guard_trim_recent }}"
                 then:
                   - delay:
                       seconds: "{{ stability_delay_seconds }}"

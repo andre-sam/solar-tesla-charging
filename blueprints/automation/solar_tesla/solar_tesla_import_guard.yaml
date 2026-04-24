@@ -5,6 +5,12 @@ blueprint:
     more than a threshold. Only ramps down — never stops the session.
     Pairs with the "Solar Tesla Charging — Controller" blueprint, which
     is the single place a stop decision is taken.
+
+    Can optionally stamp an input_datetime on every trim. When the
+    Controller is configured to read that same input_datetime, it
+    skips its stability delay for ramp-ups that happen shortly after a
+    trim — so a brief import spike (kettle, microwave) doesn't pin
+    charging at reduced current for a full stability delay.
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_import_guard.yaml
   input:
@@ -33,6 +39,18 @@ blueprint:
       selector:
         entity:
           domain: number
+
+    last_guard_trim:
+      name: Last trim timestamp (optional)
+      description: >
+        input_datetime (with date + time enabled) stamped on every
+        trim. Point the Controller's "Last Import Guard trim
+        timestamp" input at the same entity to enable fast recovery.
+        Leave empty to disable stamping.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
 
     import_threshold_w:
       name: Import threshold (W)
@@ -66,6 +84,20 @@ blueprint:
           step: 10
           unit_of_measurement: W
 
+    safety_margin_amps:
+      name: Safety margin (A)
+      description: >
+        Extra amps subtracted on top of the computed trim. The
+        computed trim already uses ceiling rounding, so 0 is usually
+        safe; bump to 1 if your meter is twitchy. Default 0.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 1
+          unit_of_measurement: A
+
 mode: restart
 max_exceeded: silent
 
@@ -74,9 +106,11 @@ variables:
   grid_import_power: !input grid_import_power
   contactor_closed: !input contactor_closed
   charge_current_number: !input charge_current_number
+  last_guard_trim: !input last_guard_trim
   import_threshold_w: !input import_threshold_w
   min_charge_amps_cfg: !input min_charge_amps
   watts_per_amp: !input watts_per_amp
+  safety_margin_amps: !input safety_margin_amps
 
 trigger:
   - platform: state
@@ -100,10 +134,23 @@ action:
       import_w: "{{ states(grid_import_power) | float(0) }}"
       current_set_amps: "{{ states(charge_current_number) | float(0) }}"
       min_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
-      reduce_by: "{{ (import_w / watts_per_amp) | round(0) | int + 1 }}"
+      # Ceiling division covers the fractional amp; safety_margin_amps
+      # adds any further cushion the user wants (default 0).
+      reduce_by: >
+        {{ ((import_w / watts_per_amp) | round(0, 'ceil') | int)
+           + (safety_margin_amps | int) }}
       reduced_amps: "{{ [(current_set_amps | int) - reduce_by, (min_amps | int)] | max }}"
   - service: number.set_value
     target:
       entity_id: !input charge_current_number
     data:
       value: "{{ reduced_amps }}"
+  - if:
+      - condition: template
+        value_template: "{{ last_guard_trim | length > 0 }}"
+    then:
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: !input last_guard_trim
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"

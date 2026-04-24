@@ -6,23 +6,31 @@ grid-power sensor pair (Enphase, Shelly EM, Powerwall, etc.).
 - Ramps current between 1 A and charger max — never stop/starts unnecessarily.
 - Holds at minimum through short cloud gaps before ending a session.
 - Separate grid-import guard trims current instantly if any appliance kicks in.
+- Fast recovery after a brief import spike: the Guard can stamp an
+  `input_datetime` the Controller reads to skip its stability delay.
 - Uses Tesla Fleet API's 1 A floor (≈ 690 W on 3-phase), not the app's 5 A.
 - Works with 1-, 2-, or 3-phase installs (configurable line voltage and phase count).
-- SOC-aware: stops adjusting once the effective charge limit is reached, even mid-session.
-- Queued execution (`max: 1`) so stability and grace delays are never cut short
-  by a burst of export fluctuations.
+- SOC-aware: the Controller is the single source of truth for the SOC
+  cap stop (optional notify).
+- Session end notifications for SOC-cap, window-end (optional hard
+  stop) and solar-exhaustion paths.
+- Wakes an ambiguous-status Tesla on resume so a mid-session sleep
+  doesn't block restart.
+- Grace-period stop lives in a separate companion automation so the
+  Controller stays responsive: if export recovers, the timer aborts.
 
 ## Blueprints
 
-All four are independent — import only the ones you need. The **Controller**
-is required; the others are optional enhancements.
+The **Controller** + **Grace Stop** pair is the minimum viable install.
+The others are optional enhancements.
 
 | Blueprint | Purpose |
 |---|---|
-| `solar_tesla_controller.yaml` | Main ramp-up / ramp-down / stop-after-grace logic. |
-| `solar_tesla_import_guard.yaml` | Instant current cut on any grid import. |
-| `solar_tesla_stop_at_soc.yaml` | Stop charging once a target SOC is hit. |
-| `solar_tesla_plugged_in_notify.yaml` | Notify when plugged in but automation is disabled. |
+| `solar_tesla_controller.yaml` | Main ramp-up / ramp-down / start / resume / SOC-cap stop. Toggles the below-minimum flag. |
+| `solar_tesla_grace_stop.yaml` | Ends the session after the below-minimum flag has stayed on for the grace period. |
+| `solar_tesla_import_guard.yaml` | Instant current cut on any grid import. Optionally stamps a trim timestamp the Controller reads for fast recovery. |
+| `solar_tesla_plugged_in_notify.yaml` | Notifies when plugged in (whether solar charging is off or on) and when the toggle is enabled while already plugged in. |
+| `solar_tesla_stop_at_soc.yaml` | **Deprecated.** The Controller now handles the SOC cap stop itself. Kept only for users who already imported it. |
 
 ## Import
 
@@ -45,12 +53,20 @@ You need these from your installation (any integration, any names):
 - A **Tesla battery SOC** sensor (%)
 - An **`input_boolean`** you create yourself as the master enable toggle
   (e.g. `input_boolean.solar_charging_enabled`)
+- A second **`input_boolean`** for the below-minimum tracker shared
+  between the Controller and the Grace Stop blueprint
+  (e.g. `input_boolean.solar_charging_below_min`)
 
 Optional:
 
 - A **Tesla charge limit** `number` entity (blueprint falls back to the
   configured SOC cap if absent)
 - A **wake-up** `button` for the Tesla integration
+- An **`input_datetime`** (date + time) shared between the Import Guard
+  and the Controller to enable fast recovery after brief import spikes
+  (e.g. `input_datetime.solar_charging_last_guard_trim`)
+- A **notify service** (e.g. `notify.mobile_app_phone`) for session
+  notifications (SOC reached, window closed, solar-exhaustion stop)
 
 ## Electrical setup
 

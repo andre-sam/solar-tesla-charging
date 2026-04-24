@@ -1,8 +1,12 @@
 blueprint:
   name: Solar Tesla Charging — Plugged-In Notification
   description: >
-    Notifies you when the Tesla is plugged in but the solar charging
-    master toggle is currently off.
+    Sends a notification in two cases:
+
+      1. The Tesla is plugged in while the solar charging master
+         toggle is OFF — reminds you to flip it on.
+      2. The master toggle is turned ON while the Tesla is already
+         plugged in — confirms that solar charging is now armed.
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_plugged_in_notify.yaml
   input:
@@ -39,6 +43,8 @@ blueprint:
 mode: single
 
 variables:
+  enable_toggle: !input enable_toggle
+  vehicle_connected: !input vehicle_connected
   window_start: !input window_start
   window_end: !input window_end
 
@@ -46,16 +52,55 @@ trigger:
   - platform: state
     entity_id: !input vehicle_connected
     to: "on"
-
-condition:
-  - condition: state
+    id: plugged_in
+  - platform: state
     entity_id: !input enable_toggle
-    state: "off"
+    to: "on"
+    id: enabled
 
 action:
-  - service: !input notify_service
-    data:
-      title: "🔌 Tesla Plugged In"
-      message: >
-        Tesla plugged in but solar charging is disabled.
-        Window: {{ window_start }}–{{ window_end }}.
+  - choose:
+      # Plugged in while solar charging is disabled.
+      - conditions:
+          - condition: trigger
+            id: plugged_in
+          - condition: state
+            entity_id: !input enable_toggle
+            state: "off"
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "🔌 Tesla Plugged In"
+              message: >
+                Tesla plugged in but solar charging is disabled.
+                Window: {{ window_start }}–{{ window_end }}.
+
+      # Plugged in while solar charging is already enabled.
+      - conditions:
+          - condition: trigger
+            id: plugged_in
+          - condition: state
+            entity_id: !input enable_toggle
+            state: "on"
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "☀️ Solar Charging Armed"
+              message: >
+                Tesla plugged in; solar charging will run during the
+                window ({{ window_start }}–{{ window_end }}).
+
+      # Toggle enabled while the car is already plugged in.
+      - conditions:
+          - condition: trigger
+            id: enabled
+          - condition: state
+            entity_id: !input vehicle_connected
+            state: "on"
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "☀️ Solar Charging Enabled"
+              message: >
+                Solar charging enabled with Tesla already plugged in.
+                Window: {{ window_start }}–{{ window_end }}.
