@@ -1,0 +1,430 @@
+blueprint:
+  name: Solar Tesla Charging — Controller
+  description: >
+    Ramp-first solar-aware Tesla charging controller. Adjusts the Tesla
+    charge current based on measured grid export, prefers ramping over
+    stop/start, and only ends a session after a sustained grace period
+    at minimum amps.
+
+    Pair with the "Grid Import Guard" blueprint for instant response to
+    grid-import events.
+  domain: automation
+  source_url: https://github.com/YOUR_USER/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
+  input:
+    enable_toggle:
+      name: Master enable toggle
+      description: input_boolean you create to enable/disable solar charging.
+      selector:
+        entity:
+          domain: input_boolean
+
+    grid_export_power_negative:
+      name: Grid export power sensor (W, negative when exporting)
+      description: >
+        Signed net or export-only counter. Must be NEGATIVE when
+        exporting to the grid. Some meters expose this as a dedicated
+        export counter that reports ≤0 W; others expose a signed net
+        grid sensor.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    grid_import_power:
+      name: Grid import power sensor (W, positive when importing)
+      description: >
+        Unidirectional import counter (≥0 W). Combined additively with
+        the export sensor so two-counter meters (e.g. Enphase) work
+        correctly. If you only have one signed sensor, point both
+        inputs at it — the math still works.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    wall_connector_power:
+      name: Wall connector power sensor
+      description: Power currently drawn by the charger (W or kW).
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    vehicle_connected:
+      name: Vehicle connected binary sensor
+      selector:
+        entity:
+          domain: binary_sensor
+
+    contactor_closed:
+      name: Contactor closed binary sensor
+      description: On when the charger is actively delivering power.
+      selector:
+        entity:
+          domain: binary_sensor
+
+    wall_connector_status:
+      name: Wall connector status sensor
+      description: Text status ("Charging", "Connected", "Fault", ...).
+      selector:
+        entity:
+          domain: sensor
+
+    charge_current_number:
+      name: Tesla charge current control (A)
+      description: number.* entity that sets the Tesla charge current.
+      selector:
+        entity:
+          domain: number
+
+    charge_switch:
+      name: Tesla charge on/off switch
+      selector:
+        entity:
+          domain: switch
+
+    battery_soc:
+      name: Tesla battery SOC sensor (%)
+      selector:
+        entity:
+          domain: sensor
+
+    charge_limit_number:
+      name: Tesla charge limit control (optional)
+      description: number.* entity for the Tesla SOC charge limit. Leave
+        empty to use only the "Max SOC" value below.
+      default: ""
+      selector:
+        entity:
+          domain: number
+
+    wake_button:
+      name: Tesla wake-up button (optional)
+      description: button.* pressed before starting charging. Leave empty
+        to skip.
+      default: ""
+      selector:
+        entity:
+          domain: button
+
+    line_voltage:
+      name: Line voltage (V)
+      default: 230
+      selector:
+        number:
+          min: 100
+          max: 260
+          step: 1
+          unit_of_measurement: V
+
+    phase_count:
+      name: Number of phases
+      description: >
+        1, 2 or 3. The grid export sensor must report TOTAL grid power
+        across all phases (typical for whole-house meters). If your
+        sensor reports per-phase watts, set this to 1.
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 3
+          step: 1
+
+    export_threshold_amps:
+      name: Export buffer (A per line)
+      description: Headroom kept between export and charge current.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.5
+          unit_of_measurement: A
+
+    min_charge_amps:
+      name: Minimum charge current (A)
+      description: Fleet API supports down to 1 A (~690 W on 3-phase).
+        The Tesla app minimum is 5 A.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 16
+          step: 1
+          unit_of_measurement: A
+
+    max_charge_amps:
+      name: Maximum charge current (A)
+      default: 16
+      selector:
+        number:
+          min: 6
+          max: 48
+          step: 1
+          unit_of_measurement: A
+
+    restart_hysteresis_amps:
+      name: Restart hysteresis (A)
+      default: 0.5
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.1
+          unit_of_measurement: A
+
+    max_soc:
+      name: Max SOC (%)
+      default: 90
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    stability_delay_seconds:
+      name: Stability delay on ramp-up (s)
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 180
+          step: 5
+          unit_of_measurement: s
+
+    stop_grace_seconds:
+      name: Stop grace at minimum (s)
+      description: Hold at min amps this long before ending the session.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 900
+          step: 30
+          unit_of_measurement: s
+
+    window_start:
+      name: Charging window start
+      default: "10:00:00"
+      selector:
+        time:
+
+    window_end:
+      name: Charging window end
+      default: "14:00:00"
+      selector:
+        time:
+
+mode: queued
+max: 1
+max_exceeded: silent
+
+variables:
+  # Re-expose inputs as template-visible variables.
+  enable_toggle: !input enable_toggle
+  grid_export_power_negative: !input grid_export_power_negative
+  grid_import_power: !input grid_import_power
+  wall_connector_power: !input wall_connector_power
+  vehicle_connected: !input vehicle_connected
+  contactor_closed: !input contactor_closed
+  wall_connector_status: !input wall_connector_status
+  charge_current_number: !input charge_current_number
+  charge_switch: !input charge_switch
+  battery_soc: !input battery_soc
+  charge_limit_number: !input charge_limit_number
+  wake_button: !input wake_button
+  line_voltage: !input line_voltage
+  phase_count: !input phase_count
+  export_threshold_amps: !input export_threshold_amps
+  min_charge_amps_cfg: !input min_charge_amps
+  max_charge_amps_cfg: !input max_charge_amps
+  restart_hysteresis_amps: !input restart_hysteresis_amps
+  max_soc: !input max_soc
+  stability_delay_seconds: !input stability_delay_seconds
+  stop_grace_seconds: !input stop_grace_seconds
+  window_start: !input window_start
+  window_end: !input window_end
+
+trigger:
+  - platform: homeassistant
+    event: start
+  - platform: time_pattern
+    minutes: "/1"
+  - platform: state
+    entity_id: !input grid_export_power_negative
+  - platform: state
+    entity_id: !input grid_import_power
+  - platform: state
+    entity_id: !input contactor_closed
+  - platform: state
+    entity_id: !input vehicle_connected
+  - platform: state
+    entity_id: !input wall_connector_status
+  - platform: state
+    entity_id: !input battery_soc
+  - platform: state
+    entity_id: !input wall_connector_power
+
+condition:
+  - condition: state
+    entity_id: !input enable_toggle
+    state: "on"
+  - condition: state
+    entity_id: !input vehicle_connected
+    state: "on"
+  # Sensor health
+  - condition: template
+    value_template: >
+      {% set bad = ['unavailable', 'unknown', 'none', ''] %}
+      {{ states(grid_export_power_negative) | lower not in bad
+         and states(grid_import_power) | lower not in bad
+         and states(wall_connector_power) | lower not in bad
+         and states(contactor_closed) | lower not in bad
+         and states(battery_soc) | lower not in bad }}
+
+action:
+  - variables:
+      # Wall connector power → watts
+      wall_power_raw: "{{ states(wall_connector_power) | float(0) }}"
+      wall_power_unit: "{{ state_attr(wall_connector_power, 'unit_of_measurement') | default('W', true) | lower }}"
+      wall_power_w: "{{ (wall_power_raw * 1000) if 'kw' in wall_power_unit else wall_power_raw }}"
+      # Effective export (W) adds back the charger's own draw.
+      # Net grid = import (≥0) + export_negative (≤0). Negative net = exporting.
+      # Flip the sign so grid_export_w is positive when exporting.
+      grid_export_w: >
+        {{ -((states(grid_import_power) | float(0))
+             + (states(grid_export_power_negative) | float(0))) }}
+      effective_export_w: "{{ grid_export_w + wall_power_w }}"
+      # Convert to per-line amps minus buffer.
+      effective_export_a: >
+        {{ (effective_export_w / line_voltage) if effective_export_w > 0 else 0 }}
+      available_amps: >
+        {% set a = (effective_export_a / phase_count) - export_threshold_amps %}
+        {{ [[a, 0] | max, max_charge_amps_cfg] | min | round(1) }}
+      # Min floor: trust user helper down to 1 A.
+      min_charge_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
+      max_charge_amps: >
+        {{ [[state_attr(charge_current_number, 'max') | float(max_charge_amps_cfg),
+             max_charge_amps_cfg] | min,
+            min_charge_amps_cfg] | max }}
+      restart_charge_amps: "{{ min_charge_amps + restart_hysteresis_amps }}"
+      current_set_amps: "{{ states(charge_current_number) | float(0) }}"
+      status_text: "{{ states(wall_connector_status) | lower }}"
+      soc: "{{ states(battery_soc) | float(0) }}"
+      tesla_limit: >
+        {% if charge_limit_number %}
+          {{ states(charge_limit_number) | float(max_soc) }}
+        {% else %}
+          {{ max_soc }}
+        {% endif %}
+      effective_limit: "{{ [max_soc, tesla_limit] | min }}"
+      now_time: "{{ now().strftime('%H:%M:%S') }}"
+      window_open: "{{ window_start <= now_time < window_end }}"
+  - choose:
+      # ── Branch 1: solar below minimum — hold at min, stop after grace ──
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ is_state(contactor_closed, 'on')
+                 and available_amps < min_charge_amps }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ (current_set_amps | int) != (min_charge_amps | int) }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input charge_current_number
+                data:
+                  value: "{{ min_charge_amps | round(0) | int }}"
+          - delay:
+              seconds: "{{ stop_grace_seconds }}"
+          # Re-read export power fresh (not the captured available_amps),
+          # so a cloud gap that clears during the grace window aborts the
+          # stop. Duplicates the effective-export math above on purpose.
+          - condition: template
+            value_template: >
+              {{ is_state(contactor_closed, 'on')
+                 and ((( -((states(grid_import_power) | float(0))
+                           + (states(grid_export_power_negative) | float(0))) ) +
+                       ((states(wall_connector_power) | float(0)) *
+                        (1000 if 'kw' in (state_attr(wall_connector_power,
+                         'unit_of_measurement') | default('W', true) | lower)
+                         else 1))) / line_voltage / phase_count
+                      - export_threshold_amps) < min_charge_amps }}
+          - service: switch.turn_off
+            target:
+              entity_id: !input charge_switch
+
+      # ── Branch 2: start / resume ──
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ is_state(contactor_closed, 'off')
+                 and window_open
+                 and is_state(vehicle_connected, 'on')
+                 and status_text not in ['fault', 'faulted', 'error', 'offline', 'unknown', 'unavailable']
+                 and available_amps >= restart_charge_amps
+                 and soc < effective_limit }}
+        sequence:
+          - variables:
+              target_amps: >
+                {% set raw = [[available_amps, max_charge_amps] | min, min_charge_amps] | max %}
+                {{ raw | round(0, 'floor') | int }}
+          - if:
+              - condition: template
+                value_template: "{{ wake_button | length > 0 }}"
+            then:
+              - service: button.press
+                target:
+                  entity_id: !input wake_button
+              - delay:
+                  seconds: 15
+          - service: number.set_value
+            target:
+              entity_id: !input charge_current_number
+            data:
+              value: "{{ target_amps }}"
+          - delay:
+              seconds: 3
+          - service: switch.turn_on
+            target:
+              entity_id: !input charge_switch
+
+      # ── Branch 3: adjust while charging ──
+      # No window_open check here on purpose: once a session is running
+      # we let it finish rather than freezing current at window_end.
+      # Branch 1 (below-min export) takes precedence over this branch.
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ is_state(contactor_closed, 'on')
+                 and available_amps >= min_charge_amps
+                 and soc < effective_limit }}
+        sequence:
+          - variables:
+              target_amps: >
+                {% set current = current_set_amps | int %}
+                {% set raw = [[available_amps, max_charge_amps] | min, min_charge_amps] | max | round(0, 'floor') | int %}
+                {% if raw > current %}
+                  {{ [raw, current + 1] | min }}
+                {% else %}
+                  {{ raw }}
+                {% endif %}
+              is_ramp_up: "{{ (target_amps | int) > (current_set_amps | int) }}"
+          - if:
+              - condition: template
+                value_template: "{{ target_amps | int != (current_set_amps | int) }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input charge_current_number
+                data:
+                  value: "{{ target_amps }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ is_ramp_up }}"
+                then:
+                  - delay:
+                      seconds: "{{ stability_delay_seconds }}"

@@ -1,0 +1,109 @@
+blueprint:
+  name: Solar Tesla Charging — Grid Import Guard
+  description: >
+    Instantly trims the Tesla charge current whenever the grid imports
+    more than a threshold. Only ramps down — never stops the session.
+    Pairs with the "Solar Tesla Charging — Controller" blueprint, which
+    is the single place a stop decision is taken.
+  domain: automation
+  source_url: https://github.com/YOUR_USER/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_import_guard.yaml
+  input:
+    enable_toggle:
+      name: Master enable toggle
+      selector:
+        entity:
+          domain: input_boolean
+
+    grid_import_power:
+      name: Grid import power sensor (W)
+      description: Positive when importing from the grid.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    contactor_closed:
+      name: Contactor closed binary sensor
+      selector:
+        entity:
+          domain: binary_sensor
+
+    charge_current_number:
+      name: Tesla charge current control (A)
+      selector:
+        entity:
+          domain: number
+
+    import_threshold_w:
+      name: Import threshold (W)
+      description: Meter-noise filter. Anything above this triggers a trim.
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 500
+          step: 10
+          unit_of_measurement: W
+
+    min_charge_amps:
+      name: Minimum charge current (A)
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 16
+          step: 1
+          unit_of_measurement: A
+
+    watts_per_amp:
+      name: Watts per 1 A of current change
+      description: 230 V × number of phases (e.g. 690 W on 3-phase).
+      default: 690
+      selector:
+        number:
+          min: 100
+          max: 2400
+          step: 10
+          unit_of_measurement: W
+
+mode: restart
+max_exceeded: silent
+
+variables:
+  enable_toggle: !input enable_toggle
+  grid_import_power: !input grid_import_power
+  contactor_closed: !input contactor_closed
+  charge_current_number: !input charge_current_number
+  import_threshold_w: !input import_threshold_w
+  min_charge_amps_cfg: !input min_charge_amps
+  watts_per_amp: !input watts_per_amp
+
+trigger:
+  - platform: state
+    entity_id: !input grid_import_power
+
+condition:
+  - condition: template
+    value_template: "{{ states(grid_import_power) | float(0) > import_threshold_w }}"
+  - condition: state
+    entity_id: !input enable_toggle
+    state: "on"
+  - condition: state
+    entity_id: !input contactor_closed
+    state: "on"
+  - condition: template
+    value_template: >
+      {{ (states(charge_current_number) | int) > (min_charge_amps_cfg | int) }}
+
+action:
+  - variables:
+      import_w: "{{ states(grid_import_power) | float(0) }}"
+      current_set_amps: "{{ states(charge_current_number) | float(0) }}"
+      min_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
+      reduce_by: "{{ (import_w / watts_per_amp) | round(0) | int + 1 }}"
+      reduced_amps: "{{ [(current_set_amps | int) - reduce_by, (min_amps | int)] | max }}"
+  - service: number.set_value
+    target:
+      entity_id: !input charge_current_number
+    data:
+      value: "{{ reduced_amps }}"

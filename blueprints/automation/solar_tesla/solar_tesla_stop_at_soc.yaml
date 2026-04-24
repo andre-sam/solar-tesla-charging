@@ -1,0 +1,94 @@
+blueprint:
+  name: Solar Tesla Charging — Stop at Max SOC
+  description: >
+    Stops the Tesla charge switch once the battery reaches the lower of
+    the configured cap and the Tesla car-side charge limit.
+  domain: automation
+  source_url: https://github.com/YOUR_USER/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_stop_at_soc.yaml
+  input:
+    enable_toggle:
+      name: Master enable toggle
+      selector:
+        entity:
+          domain: input_boolean
+
+    battery_soc:
+      name: Tesla battery SOC sensor (%)
+      selector:
+        entity:
+          domain: sensor
+
+    contactor_closed:
+      name: Contactor closed binary sensor
+      selector:
+        entity:
+          domain: binary_sensor
+
+    charge_switch:
+      name: Tesla charge on/off switch
+      selector:
+        entity:
+          domain: switch
+
+    charge_limit_number:
+      name: Tesla charge limit control (optional)
+      default: ""
+      selector:
+        entity:
+          domain: number
+
+    max_soc:
+      name: Max SOC cap (%)
+      default: 90
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    notify_service:
+      name: Notify service (optional)
+      description: e.g. notify.mobile_app_phone. Blank disables notifications.
+      default: ""
+      selector:
+        text:
+
+mode: single
+
+variables:
+  battery_soc: !input battery_soc
+  charge_limit_number: !input charge_limit_number
+  max_soc: !input max_soc
+  notify_service: !input notify_service
+
+trigger:
+  - platform: template
+    value_template: >
+      {% set helper_limit = max_soc | float(90) %}
+      {% set tesla_limit = (states(charge_limit_number) | float(helper_limit))
+                           if charge_limit_number else helper_limit %}
+      {% set effective_limit = [helper_limit, tesla_limit] | min %}
+      {{ states(battery_soc) | float(0) >= effective_limit }}
+
+condition:
+  - condition: state
+    entity_id: !input contactor_closed
+    state: "on"
+  - condition: state
+    entity_id: !input enable_toggle
+    state: "on"
+
+action:
+  - service: switch.turn_off
+    target:
+      entity_id: !input charge_switch
+  - if:
+      - condition: template
+        value_template: "{{ notify_service | length > 0 }}"
+    then:
+      - service: "{{ notify_service }}"
+        data:
+          title: "🔋 Tesla Fully Charged (Solar)"
+          message: >
+            Tesla reached {{ states(battery_soc) }}%. Solar charging stopped.
