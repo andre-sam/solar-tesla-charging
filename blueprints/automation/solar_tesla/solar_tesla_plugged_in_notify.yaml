@@ -1,12 +1,22 @@
 blueprint:
   name: Solar Tesla Charging — Plugged-In Notification
   description: >
-    Sends a notification in two cases:
+    Sends a notification on the meaningful plug/toggle lifecycle
+    transitions:
 
       1. The Tesla is plugged in while the solar charging master
          toggle is OFF — reminds you to flip it on.
-      2. The master toggle is turned ON while the Tesla is already
-         plugged in — confirms that solar charging is now armed.
+      2. The Tesla is plugged in while the toggle is already ON —
+         confirms solar charging is armed.
+      3. The toggle is turned ON while the Tesla is already plugged
+         in — confirms solar charging is now armed.
+      4. The toggle is turned OFF while a session is running —
+         confirms the session was aborted manually.
+
+    NOTE: the charging window (`window_start`/`window_end`) is shown
+    in notifications only — it does NOT gate charging here. Keep
+    these times in sync with the Controller blueprint's window if
+    you change them, otherwise the messages will be misleading.
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_plugged_in_notify.yaml
   input:
@@ -18,6 +28,16 @@ blueprint:
 
     vehicle_connected:
       name: Vehicle connected binary sensor
+      selector:
+        entity:
+          domain: binary_sensor
+
+    contactor_closed:
+      name: Contactor closed binary sensor (optional)
+      description: >
+        Used only to detect "toggle turned off mid-session". Leave
+        empty to skip that notification.
+      default: ""
       selector:
         entity:
           domain: binary_sensor
@@ -45,6 +65,7 @@ mode: single
 variables:
   enable_toggle: !input enable_toggle
   vehicle_connected: !input vehicle_connected
+  contactor_closed: !input contactor_closed
   window_start: !input window_start
   window_end: !input window_end
 
@@ -57,6 +78,10 @@ trigger:
     entity_id: !input enable_toggle
     to: "on"
     id: enabled
+  - platform: state
+    entity_id: !input enable_toggle
+    to: "off"
+    id: disabled
 
 action:
   - choose:
@@ -104,3 +129,21 @@ action:
               message: >
                 Solar charging enabled with Tesla already plugged in.
                 Window: {{ window_start }}–{{ window_end }}.
+
+      # Toggle disabled while a session is actively running.
+      - conditions:
+          - condition: trigger
+            id: disabled
+          - condition: template
+            value_template: "{{ contactor_closed | length > 0 }}"
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "on"
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "⏹️ Solar Charging Disabled"
+              message: >
+                Solar charging disabled while a session was running —
+                the Controller will stop the charger on its next
+                evaluation.

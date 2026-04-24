@@ -10,6 +10,12 @@ blueprint:
     This is separated from the main Controller so the Controller stays
     responsive during the grace window — the moment export recovers,
     the Controller clears the flag and this automation's timer aborts.
+
+    IMPORTANT — shared inputs: the `below_min_flag`, `enable_toggle`,
+    `contactor_closed` and `charge_switch` entities MUST be the exact
+    same entities configured in the Controller. Home Assistant does
+    not share state between blueprint instances, so mismatches fail
+    silently (the session simply never ends on low solar).
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_grace_stop.yaml
   input:
@@ -84,6 +90,15 @@ trigger:
     to: "on"
     for:
       seconds: !input stop_grace_seconds
+    id: grace_expired
+  # Startup reconciliation: the `for:` trigger above does not fire for
+  # flag transitions that happened before HA restarted. If the flag was
+  # left ON from a previous session, nothing would ever end it. On
+  # startup we either finish the stop (if a session is still running)
+  # or clear the stale flag (if no session is active).
+  - platform: homeassistant
+    event: start
+    id: ha_start
 
 condition:
   - condition: state
@@ -92,26 +107,40 @@ condition:
   - condition: state
     entity_id: !input below_min_flag
     state: "on"
-  - condition: state
-    entity_id: !input contactor_closed
-    state: "on"
 
 action:
-  - service: switch.turn_off
-    target:
-      entity_id: !input charge_switch
-  - service: input_boolean.turn_off
-    target:
-      entity_id: !input below_min_flag
-  - if:
-      - condition: template
-        value_template: "{{ notify_service | length > 0 }}"
-    then:
-      - service: "{{ notify_service }}"
-        data:
-          title: "☁️ Solar Session Ended"
-          message: >
-            Solar export stayed below minimum for
-            {{ (stop_grace_seconds | int // 60) }} min.
-            Charging stopped{% if battery_soc %} at
-            {{ states(battery_soc) | round(0) }}%{% endif %}.
+  - choose:
+      # Startup with flag stuck on but no session running → just clear.
+      - conditions:
+          - condition: trigger
+            id: ha_start
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "off"
+        sequence:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input below_min_flag
+    default:
+      # Normal grace-expired stop, or startup with a session still running.
+      - condition: state
+        entity_id: !input contactor_closed
+        state: "on"
+      - service: switch.turn_off
+        target:
+          entity_id: !input charge_switch
+      - service: input_boolean.turn_off
+        target:
+          entity_id: !input below_min_flag
+      - if:
+          - condition: template
+            value_template: "{{ notify_service | length > 0 }}"
+        then:
+          - service: "{{ notify_service }}"
+            data:
+              title: "☁️ Solar Session Ended"
+              message: >
+                Solar export stayed below minimum for
+                {{ (stop_grace_seconds | int // 60) }} min.
+                Charging stopped{% if battery_soc %} at
+                {{ states(battery_soc) | round(0) }}%{% endif %}.

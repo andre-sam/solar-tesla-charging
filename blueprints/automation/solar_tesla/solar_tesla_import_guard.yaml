@@ -11,6 +11,13 @@ blueprint:
     skips its stability delay for ramp-ups that happen shortly after a
     trim — so a brief import spike (kettle, microwave) doesn't pin
     charging at reduced current for a full stability delay.
+
+    IMPORTANT — shared inputs: `enable_toggle`, `contactor_closed`
+    and `charge_current_number` must match the Controller exactly.
+    If `last_guard_trim` is used, it must point at the same
+    input_datetime configured on the Controller's
+    "Last Import Guard trim timestamp" input. Mismatches fail
+    silently.
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_import_guard.yaml
   input:
@@ -140,11 +147,10 @@ action:
         {{ ((import_w / watts_per_amp) | round(0, 'ceil') | int)
            + (safety_margin_amps | int) }}
       reduced_amps: "{{ [(current_set_amps | int) - reduce_by, (min_amps | int)] | max }}"
-  - service: number.set_value
-    target:
-      entity_id: !input charge_current_number
-    data:
-      value: "{{ reduced_amps }}"
+  # Stamp the trim timestamp FIRST so that under heavy sensor chatter
+  # (mode: restart re-firing repeatedly) the Controller still sees a
+  # recent trim marker even if the number.set_value below is preempted
+  # by the next invocation.
   - if:
       - condition: template
         value_template: "{{ last_guard_trim | length > 0 }}"
@@ -154,3 +160,8 @@ action:
           entity_id: !input last_guard_trim
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+  - service: number.set_value
+    target:
+      entity_id: !input charge_current_number
+    data:
+      value: "{{ reduced_amps }}"
