@@ -9,7 +9,7 @@ blueprint:
     Pair with the "Grid Import Guard" blueprint for instant response to
     grid-import events.
   domain: automation
-  source_url: https://github.com/YOUR_USER/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
+  source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
   input:
     enable_toggle:
       name: Master enable toggle
