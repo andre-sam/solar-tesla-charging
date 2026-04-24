@@ -4,7 +4,7 @@ blueprint:
     Stops the Tesla charge switch once the battery reaches the lower of
     the configured cap and the Tesla car-side charge limit.
   domain: automation
-  source_url: https://github.com/YOUR_USER/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_stop_at_soc.yaml
+  source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_stop_at_soc.yaml
   input:
     enable_toggle:
       name: Master enable toggle
