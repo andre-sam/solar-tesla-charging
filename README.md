@@ -100,8 +100,8 @@ Set these inputs on the Controller to match your install:
 
 | Install | `line_voltage` | `phase_count` |
 |---|---|---|
-| EU 1-phase | 230 | 1 |
-| EU 3-phase | 230 | 3 |
+| AU/EU 1-phase | 230 | 1 |
+| AU/EU 3-phase | 230 | 3 |
 | UK 1-phase | 240 | 1 |
 | US split-phase (240 V) | 240 | 1 |
 | US 1-phase (120 V) | 120 | 1 |
