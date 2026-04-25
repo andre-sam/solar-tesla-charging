@@ -278,16 +278,27 @@ blueprint:
         boolean:
 
     window_start:
-      name: Charging window start
-      default: "10:00:00"
+      name: Charging window start (input_datetime)
+      description: >
+        input_datetime helper (time only) defining when the charging
+        window opens. Create once in HA (Settings → Devices &
+        services → Helpers → Date/time, "time only") and point this
+        AND the Plugged-In Notify blueprint's window_start at the
+        same helper so the dashboard becomes the single source of
+        truth.
       selector:
-        time:
+        entity:
+          domain: input_datetime
 
     window_end:
-      name: Charging window end
-      default: "14:00:00"
+      name: Charging window end (input_datetime)
+      description: >
+        input_datetime helper (time only) defining when the charging
+        window closes. Must be the same helper used by the
+        Plugged-In Notify blueprint.
       selector:
-        time:
+        entity:
+          domain: input_datetime
 
 mode: single
 max_exceeded: silent
@@ -399,7 +410,9 @@ action:
         {% endif %}
       effective_limit: "{{ [max_soc, tesla_limit] | min }}"
       now_time: "{{ now().strftime('%H:%M:%S') }}"
-      window_open: "{{ window_start <= now_time < window_end }}"
+      window_start_str: "{{ states(window_start) }}"
+      window_end_str: "{{ states(window_end) }}"
+      window_open: "{{ window_start_str <= now_time < window_end_str }}"
       flag_on: "{{ is_state(below_min_flag, 'on') }}"
       seconds_since_guard_trim: >
         {% if last_guard_trim %}
@@ -459,7 +472,7 @@ action:
                 data:
                   title: "⏱️ Solar Window Closed"
                   message: >
-                    Charging window ended ({{ window_start }}–{{ window_end }}).
+                    Charging window ended ({{ window_start_str }}–{{ window_end_str }}).
                     Solar session stopped at {{ soc | round(0) }}%.
 
       # ── Branch 3: Below minimum — hold at min, raise flag ─────────

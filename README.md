@@ -56,6 +56,12 @@ You need these from your installation (any integration, any names):
 - A second **`input_boolean`** for the below-minimum tracker shared
   between the Controller and the Grace Stop blueprint
   (e.g. `input_boolean.solar_charging_below_min`)
+- Two **`input_datetime`** helpers (time-only) for the charging window,
+  shared between the Controller and the Plugged-In Notify blueprint
+  (e.g. `input_datetime.solar_window_start`,
+  `input_datetime.solar_window_end`). Expose these on your dashboard to
+  change the window from the EV view — both blueprints read the same
+  helpers, so notifications and control stay in sync.
 
 Optional:
 
@@ -67,6 +73,26 @@ Optional:
   (e.g. `input_datetime.solar_charging_last_guard_trim`)
 - A **notify service** (e.g. `notify.mobile_app_phone`) for session
   notifications (SOC reached, window closed, solar-exhaustion stop)
+
+## Charging window (dashboard control)
+
+The Controller and Plugged-In Notify blueprints both take the window
+start/end as `input_datetime` entity inputs (time-only helpers). Create
+the helpers once, point both blueprints at them, and add them to a
+dashboard card to change the window without editing automations:
+
+```yaml
+type: entities
+title: Solar Charging
+entities:
+  - input_boolean.solar_charging_enabled
+  - input_datetime.solar_window_start
+  - input_datetime.solar_window_end
+```
+
+The Controller re-evaluates every minute, so changes take effect within
+~60 s. Cross-midnight windows are not supported (string comparison on
+`HH:MM:SS`).
 
 ## Electrical setup
 

@@ -14,12 +14,11 @@ blueprint:
          confirms the session was aborted manually.
 
     NOTE: the charging window (`window_start`/`window_end`) is shown
-    in notifications only — it does NOT gate charging here. Keep
-    these times in sync with the Controller blueprint's window if
-    you change them. There is no enforcement: if they drift, the
-    notifications will display the wrong window times but charging
-    behaviour is unaffected (the Controller remains the sole gate on
-    when sessions can start).
+    in notifications only — it does NOT gate charging here. Point
+    these inputs at the SAME input_datetime helpers used by the
+    Controller blueprint so the dashboard is the single source of
+    truth. The Controller remains the sole gate on when sessions can
+    start; this blueprint just reads the same helpers for display.
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_plugged_in_notify.yaml
   input:
@@ -52,16 +51,23 @@ blueprint:
         text:
 
     window_start:
-      name: Charging window start
-      default: "10:00:00"
+      name: Charging window start (input_datetime)
+      description: >
+        input_datetime helper (time only) defining when the charging
+        window opens. MUST be the same helper used by the Controller
+        blueprint so messages reflect the actual control window.
       selector:
-        time:
+        entity:
+          domain: input_datetime
 
     window_end:
-      name: Charging window end
-      default: "14:00:00"
+      name: Charging window end (input_datetime)
+      description: >
+        input_datetime helper (time only). MUST match the Controller
+        blueprint's window_end.
       selector:
-        time:
+        entity:
+          domain: input_datetime
 
 mode: single
 
@@ -101,7 +107,7 @@ action:
               title: "🔌 Tesla Plugged In"
               message: >
                 Tesla plugged in but solar charging is disabled.
-                Window: {{ window_start }}–{{ window_end }}.
+                Window: {{ states(window_start) }}–{{ states(window_end) }}.
 
       # Plugged in while solar charging is already enabled.
       - conditions:
@@ -116,7 +122,7 @@ action:
               title: "☀️ Solar Charging Armed"
               message: >
                 Tesla plugged in; solar charging will run during the
-                window ({{ window_start }}–{{ window_end }}).
+                window ({{ states(window_start) }}–{{ states(window_end) }}).
 
       # Toggle enabled while the car is already plugged in.
       - conditions:
@@ -131,7 +137,7 @@ action:
               title: "☀️ Solar Charging Enabled"
               message: >
                 Solar charging enabled with Tesla already plugged in.
-                Window: {{ window_start }}–{{ window_end }}.
+                Window: {{ states(window_start) }}–{{ states(window_end) }}.
 
       # Toggle disabled while a session is actively running.
       - conditions:
