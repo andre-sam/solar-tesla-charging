@@ -16,6 +16,10 @@ grid-power sensor pair (Enphase, Shelly EM, Powerwall, etc.).
   stop) and solar-exhaustion paths.
 - Wakes an ambiguous-status Tesla on resume so a mid-session sleep
   doesn't block restart.
+- Optional **Solcast forecast boost**: raises the SOC cap on a sunny
+  day when the next 1–3 days are forecast to be poor, so you stash
+  extra charge before bad weather. Disabled by default; activates only
+  when Solcast sensors are configured.
 - Grace-period stop lives in a separate companion automation so the
   Controller stays responsive: if export recovers, the timer aborts.
 
@@ -73,6 +77,47 @@ Optional:
   (e.g. `input_datetime.solar_charging_last_guard_trim`)
 - A **notify service** (e.g. `notify.mobile_app_phone`) for session
   notifications (SOC reached, window closed, solar-exhaustion stop)
+- **Solcast PV Forecast** daily-total sensors for the forecast boost.
+  Pick today, tomorrow, and as many of `day_3`–`day_7` as you want
+  (the lookahead input chooses how far ahead to inspect):
+  `sensor.solcast_pv_forecast_forecast_today`,
+  `sensor.solcast_pv_forecast_forecast_tomorrow`,
+  `sensor.solcast_pv_forecast_forecast_day_3`,
+  `sensor.solcast_pv_forecast_forecast_day_4`,
+  `sensor.solcast_pv_forecast_forecast_day_5`,
+  `sensor.solcast_pv_forecast_forecast_day_6`,
+  `sensor.solcast_pv_forecast_forecast_day_7`
+
+## Forecast boost (optional)
+
+The Controller has two SOC caps:
+
+| Input | Role |
+|---|---|
+| **Preferred SOC cap** | Normal stop point (e.g. 60 %). |
+| **Boost SOC cap** | Higher stop point used only when the forecast says today is the last sunny day before bad weather (e.g. 80 %). |
+
+The boost is **active for the day** when *all* of the following hold:
+
+1. `solcast_today_kwh` ≥ "sunny today" threshold (e.g. 25 kWh).
+2. Every Solcast forecast for the next `boost_lookahead_days` (1–6) is
+   ≤ "bad day" threshold (e.g. 12 kWh) — and every one of those
+   sensors has a valid reading.
+3. Boost SOC cap > Preferred SOC cap.
+
+If any upcoming forecast sensor is missing or unavailable, the boost
+is suppressed (fail-safe — better to under-charge than to assume a
+sunny week ahead based on partial data).
+
+Leave all `solcast_*_kwh` inputs blank to disable the feature
+entirely; the Controller then behaves exactly as before with
+`max_soc` as the only cap.
+
+> **Note on Solcast naming:** the upcoming-day sensors are
+> `forecast_tomorrow`, `forecast_day_3`, `forecast_day_4`, … so
+> `day_3` is **two** days from today, `day_7` is **six** days from
+> today. The lookahead consumes them in order, so to look 3 days
+> ahead set lookahead = 3 and provide tomorrow + day_3 + day_4.
 
 ## Charging window (dashboard control)
 

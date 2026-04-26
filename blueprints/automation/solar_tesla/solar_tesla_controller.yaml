@@ -233,7 +233,12 @@ blueprint:
           unit_of_measurement: A
 
     max_soc:
-      name: Max SOC (%)
+      name: Preferred SOC cap (%)
+      description: >
+        Normal target SOC for solar charging. The Controller stops the
+        session at this SOC unless the optional Solcast forecast boost
+        is configured AND triggered (see below), in which case the
+        boost cap is used instead.
       default: 90
       selector:
         number:
@@ -241,6 +246,125 @@ blueprint:
           max: 100
           step: 1
           unit_of_measurement: "%"
+
+    boost_soc:
+      name: Boost SOC cap (%)
+      description: >
+        Raised SOC cap used on a "last sunny day before bad weather"
+        according to the Solcast forecast inputs below. Should be ≥
+        Preferred SOC cap. Has no effect unless at least the "today"
+        and "+1 day" Solcast sensors are provided.
+      default: 90
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    solcast_today_kwh:
+      name: Solcast forecast — today (kWh) (optional)
+      description: >
+        Sensor that reports today's total forecast PV production in kWh
+        (e.g. sensor.solcast_pv_forecast_forecast_today). Required to
+        enable the forecast boost; leave empty to disable.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    solcast_tomorrow_kwh:
+      name: Solcast forecast — tomorrow (+1 day, kWh) (optional)
+      description: >
+        e.g. sensor.solcast_pv_forecast_forecast_tomorrow. Required to
+        enable the forecast boost; leave empty to disable.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    solcast_day_3_kwh:
+      name: Solcast forecast — day 3 / +2 days (kWh) (optional)
+      description: e.g. sensor.solcast_pv_forecast_forecast_day_3
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    solcast_day_4_kwh:
+      name: Solcast forecast — day 4 / +3 days (kWh) (optional)
+      description: e.g. sensor.solcast_pv_forecast_forecast_day_4
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    solcast_day_5_kwh:
+      name: Solcast forecast — day 5 / +4 days (kWh) (optional)
+      description: e.g. sensor.solcast_pv_forecast_forecast_day_5
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    solcast_day_6_kwh:
+      name: Solcast forecast — day 6 / +5 days (kWh) (optional)
+      description: e.g. sensor.solcast_pv_forecast_forecast_day_6
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    solcast_day_7_kwh:
+      name: Solcast forecast — day 7 / +6 days (kWh) (optional)
+      description: e.g. sensor.solcast_pv_forecast_forecast_day_7
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    boost_lookahead_days:
+      name: Boost lookahead (days)
+      description: >
+        How many forecast days after today to inspect when deciding
+        whether to boost. ALL inspected days must be ≤ "bad day"
+        threshold AND today must be ≥ "sunny day" threshold to
+        activate the boost. Capped by how many Solcast sensors you
+        provided (in order: tomorrow, day 3, day 4, …, day 7).
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 6
+          step: 1
+          unit_of_measurement: d
+
+    boost_today_min_kwh:
+      name: Boost — "sunny today" threshold (kWh)
+      description: >
+        Today's forecast must be at or above this to count as sunny
+        enough to justify boosting the cap. Set to your typical
+        good-day production minus a margin.
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          unit_of_measurement: kWh
+
+    boost_bad_day_max_kwh:
+      name: Boost — "bad day" threshold (kWh)
+      description: >
+        A forecast day is considered "bad" when its total is at or
+        below this value.
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          unit_of_measurement: kWh
 
     stability_delay_seconds:
       name: Stability delay on ramp-up (s)
@@ -326,6 +450,17 @@ variables:
   max_charge_amps_cfg: !input max_charge_amps
   restart_hysteresis_amps: !input restart_hysteresis_amps
   max_soc: !input max_soc
+  boost_soc: !input boost_soc
+  solcast_today_kwh: !input solcast_today_kwh
+  solcast_tomorrow_kwh: !input solcast_tomorrow_kwh
+  solcast_day_3_kwh: !input solcast_day_3_kwh
+  solcast_day_4_kwh: !input solcast_day_4_kwh
+  solcast_day_5_kwh: !input solcast_day_5_kwh
+  solcast_day_6_kwh: !input solcast_day_6_kwh
+  solcast_day_7_kwh: !input solcast_day_7_kwh
+  boost_lookahead_days: !input boost_lookahead_days
+  boost_today_min_kwh: !input boost_today_min_kwh
+  boost_bad_day_max_kwh: !input boost_bad_day_max_kwh
   stability_delay_seconds: !input stability_delay_seconds
   post_trim_fast_recovery_seconds: !input post_trim_fast_recovery_seconds
   hard_stop_at_window_end: !input hard_stop_at_window_end
@@ -408,7 +543,39 @@ action:
         {% else %}
           {{ max_soc }}
         {% endif %}
-      effective_limit: "{{ [max_soc, tesla_limit] | min }}"
+      # ── Solcast forecast boost ───────────────────────────────────
+      # Active when today's forecast is "sunny" AND every inspected
+      # upcoming day is "bad". Lookahead is capped by how many of the
+      # +1/+2/+3 sensors you actually configured. Any missing or
+      # unavailable upcoming reading disables the boost (fail-safe).
+      forecast_bad_values: "{{ ['unavailable', 'unknown', 'none', ''] }}"
+      solcast_today_val: >
+        {% if solcast_today_kwh and states(solcast_today_kwh) | lower not in forecast_bad_values %}
+          {{ states(solcast_today_kwh) | float(-1) }}
+        {% else %}
+          -1ay_3_kwh, solcast_day_4_kwh,
+                    solcast_day_5_kwh, solcast_day_6_kwh, solcast_day_7
+        {% endif %}
+      forecast_upcoming_sensors: >
+        {% set s = [solcast_tomorrow_kwh, solcast_d2_kwh, solcast_d3_kwh]
+           | select | list %}
+        {{ s[:boost_lookahead_days | int] }}
+      forecast_upcoming_vals: >
+        {% set ns = namespace(vals=[]) %}
+        {% for s in forecast_upcoming_sensors %}
+          {% if states(s) | lower not in forecast_bad_values %}
+            {% set ns.vals = ns.vals + [states(s) | float(-1)] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.vals }}
+      boost_active: >
+        {{ boost_soc > max_soc
+           and solcast_today_val >= boost_today_min_kwh
+           and forecast_upcoming_sensors | length > 0
+           and forecast_upcoming_vals | length == forecast_upcoming_sensors | length
+           and forecast_upcoming_vals | max <= boost_bad_day_max_kwh }}
+      preferred_cap: "{{ boost_soc if boost_active else max_soc }}"
+      effective_limit: "{{ [preferred_cap, tesla_limit] | min }}"
       now_time: "{{ now().strftime('%H:%M:%S') }}"
       window_start_str: "{{ states(window_start) }}"
       window_end_str: "{{ states(window_end) }}"
@@ -447,7 +614,7 @@ action:
                 data:
                   title: "🔋 Tesla Fully Charged (Solar)"
                   message: >
-                    Tesla reached {{ soc | round(0) }}% (limit {{ effective_limit | round(0) }}%).
+                    Tesla reached {{ soc | round(0) }}% (limit {{ effective_limit | round(0) }}%{% if boost_active %}, forecast boost{% endif %}).
                     Solar charging stopped.
 
       # ── Branch 2: Hard stop at window end (optional) ──────────────
@@ -563,7 +730,10 @@ action:
                   message: >
                     Session started at {{ target_amps }} A
                     (SOC {{ soc | round(0) }}%, limit
-                    {{ effective_limit | round(0) }}%).
+                    {{ effective_limit | round(0) }}%{% if boost_active %},
+                    forecast boost: today {{ solcast_today_val | round(1) }} kWh,
+                    next {{ forecast_upcoming_vals | length }}d ≤
+                    {{ boost_bad_day_max_kwh }} kWh{% endif %}).
 
       # ── Branch 6: Adjust while charging ───────────────────────────
       # No window_open check here unless hard_stop_at_window_end is on
