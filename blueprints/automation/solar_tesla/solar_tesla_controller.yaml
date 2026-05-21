@@ -238,6 +238,25 @@ blueprint:
           step: 0.1
           unit_of_measurement: A
 
+    fast_ramp_headroom_amps:
+      name: Fast ramp-up headroom (A)
+      description: >
+        When available export jumps ahead of the current setpoint by
+        at least this many amps, the controller ramps directly to
+        the target in a single step instead of the default +1 A per
+        minute. Recovers quickly from a cloud-clearing event at the
+        cost of larger setpoint changes (the car can sometimes
+        complain about abrupt changes). Set to a very large value
+        (e.g. 20) to disable fast ramp-up and always use the +1 A
+        cap.
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+          unit_of_measurement: A
+
     max_soc:
       name: Preferred SOC cap (%)
       description: >
@@ -555,6 +574,7 @@ variables:
   min_charge_amps_cfg: !input min_charge_amps
   max_charge_amps_cfg: !input max_charge_amps
   restart_hysteresis_amps: !input restart_hysteresis_amps
+  fast_ramp_headroom_amps: !input fast_ramp_headroom_amps
   max_soc: !input max_soc
   boost_soc: !input boost_soc
   solcast_today_kwh: !input solcast_today_kwh
@@ -1276,7 +1296,10 @@ action:
                         {% set current = current_set_amps | int %}
                         {% set raw = [[available_amps, max_charge_amps] | min,
                                       min_charge_amps] | max | round(0, 'floor') | int %}
-                        {% if raw > current %}
+                        {% set headroom = raw - current %}
+                        {% if headroom >= (fast_ramp_headroom_amps | int) %}
+                          {{ raw }}
+                        {% elif raw > current %}
                           {{ [raw, current + 1] | min }}
                         {% else %}
                           {{ raw }}
