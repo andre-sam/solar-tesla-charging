@@ -13,12 +13,17 @@ blueprint, one automation, every behaviour:
 - Fast recovery after a brief import spike. The guard stamps an
   `input_datetime` the same automation reads to skip its stability
   delay so a kettle pulse doesn't pin charging low.
+- **Fast ramp-up** (configurable): when available export jumps well
+  ahead of the current setpoint (default 3 A of headroom), jump
+  directly to target in one tick instead of the conservative +1 A
+  per minute. Recovers from a cloud-clearing event in one step.
 - Uses Tesla Fleet API's 1 A floor (about 690 W on 3-phase), not the
   app's 5 A.
 - Works with 1-, 2-, or 3-phase installs (configurable line voltage
   and phase count).
 - SOC-aware: stops at the lower of the configured cap and the Tesla
-  car-side charge limit.
+  car-side charge limit. The car-side limit is read but never
+  written, so your Tesla app setting is left untouched.
 - Lifecycle notifications: plug-in (whether solar charging is armed
   or not), enable while plugged in, disable mid-session.
 - Session-end notifications for SOC cap, optional hard window-end
@@ -28,20 +33,35 @@ blueprint, one automation, every behaviour:
 - Optional **Solcast forecast boost**: raises the SOC cap on a sunny
   day when the next 1 to 6 days are forecast to be poor, so you
   stash extra charge before bad weather. Disabled by default;
-  activates only when Solcast sensors are configured.
+  activates only when Solcast sensors are configured. Suppressed
+  if any required forecast sensor is missing or unavailable.
+- Optional **load prioritisation**: temporarily pauses other
+  power-hungry automations (AC, pool pump, etc.) while the Tesla
+  SOC is low so the car gets first claim on solar export. Loads
+  are restored automatically when the SOC cap is reached, with a
+  window-end safety net.
+- Optional **session start lock**: dedupes "Solar Charging Started"
+  notifications when the start branch is re-entered during the 15 s
+  car-wake delay. Auto-clears on contactor open, HA restart, or
+  unplug.
+- Optional **Tesla unreachable guard**: tick branch skips its main
+  evaluation when Tesla Fleet API entities are unavailable, so a
+  Fleet API hiccup doesn't produce a noisy failure log.
+- Robust against missing or unavailable sensors throughout. Each
+  branch fails closed.
 
 ## Blueprints
 
 | Blueprint | Purpose |
 |---|---|
-| `solar_tesla_controller.yaml` | Single all-in-one automation. Controls ramp / start / stop, runs the import-spike trim, the below-minimum grace stop, and the plug/toggle lifecycle notifications. |
-| `solar_tesla_stop_at_soc.yaml` | **Deprecated.** The controller now handles the SOC cap stop itself. Kept only for users who already imported it. |
+| `solar_tesla_controller.yaml` | Single all-in-one automation. Controls ramp / start / stop, runs the import-spike trim, the below-minimum grace stop, the plug/toggle lifecycle notifications, load prioritisation, and session-end cleanup. |
 
 Earlier versions of this repo split the behaviour across four
 blueprints (Controller + Grace Stop + Import Guard + Plugged-In
-Notify). The consolidated controller absorbs all four. If you're
-upgrading, delete the three retired blueprints and the automations
-they powered, then import the new controller and configure it once.
+Notify), plus a separate Stop-At-SOC blueprint. The consolidated
+controller absorbs all of them. If you're upgrading, delete the
+retired blueprints and the automations they powered, then import
+the new controller and configure it once.
 
 ## Import
 
@@ -84,6 +104,10 @@ Optional:
   spikes (e.g. `input_datetime.solar_charging_last_guard_trim`)
 - A **notify service** (e.g. `notify.mobile_app_phone`) for session
   and lifecycle notifications
+- A third **`input_boolean`** as a session start lock (e.g.
+  `input_boolean.solar_charging_session_active`). Dedupes the
+  "Solar Charging Started" notification when the start branch is
+  re-entered during the 15 s wake delay. See [Session start lock](#session-start-lock-optional).
 - One or more **`input_boolean`** entities that gate other power-
   hungry automations (AC, pool pump, etc.) you want the controller
   to pause while the Tesla SOC is low. See [Load prioritisation](#load-prioritisation-optional).
@@ -238,6 +262,47 @@ Behaviour:
 
 Leave the input empty to disable the feature entirely.
 
+## Session start lock (optional)
+
+Under `mode: parallel`, the start branch can be re-entered while
+the previous run is still inside its 15 s car-wake delay, producing
+a duplicate "Solar Charging Started" notification. The session
+start lock prevents this.
+
+Wire-up:
+
+1. Create an `input_boolean` helper (e.g.
+   `input_boolean.solar_charging_session_active`).
+2. Point the controller's **Session start lock (optional)** input
+   at it.
+3. Done. The controller turns it ON at the start of a session and
+   OFF when the contactor opens for 10 seconds, on HA restart
+   (when no session is live), or when the car is unplugged.
+
+Leave the input empty to skip the lock; duplicate "Started"
+notifications are then possible if the start branch is re-entered
+during the wake delay.
+
+## Tuning for cloudy / fluctuating solar
+
+The defaults are tuned for stable solar with a generous buffer.
+If your sky is patchy, the following inputs make the controller
+track solar more aggressively at the cost of more Fleet API
+chatter and slightly higher chance of brief grid imports:
+
+| Input | Default | Aggressive value | Effect |
+|---|---|---|---|
+| `export_threshold_amps` | 1 | 0 | Removes the constant ~230 W (1-ph) / 690 W (3-ph) export buffer. |
+| `stability_delay_seconds` | 60 | 15 to 30 | Time the controller waits between ramp-up steps. |
+| `post_trim_fast_recovery_seconds` | 180 | 300 to 600 | After an import-spike trim, the stability delay is skipped for this long. Bigger window = controller stays in fast mode through a cloud event. |
+| `import_threshold_w` | 50 | 25 to 30 | Noise floor for the import-spike trim. Lower = reacts to smaller imports. |
+| `fast_ramp_headroom_amps` | 3 | 2 | When available export is at least this many amps above the current setpoint, jump directly to target instead of the +1 A per minute cap. |
+
+If you also have a fine-grained PV diverter (myenergi Eddi or
+similar) on the same circuit, leave it to handle the residual
+below ~700 W. Tesla can't compete with phase-angle PWM control at
+sub-amp resolution.
+
 ## Runtime model
 
 The consolidated controller is a single `mode: parallel` automation.
@@ -246,14 +311,15 @@ branch:
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
-| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. |
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Skipped when Tesla Fleet API entities are unavailable. |
 | `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session and notify. |
-| `ha_start_reconcile` | HA start | Clear a stale below-minimum flag if no session is running. |
+| `ha_start_reconcile` | HA start | Clear stale stateful flags (below-minimum tracker, session start lock) if no session is running. |
 | `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. |
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
 | `disabled` | Enable toggle goes OFF mid-session | Notify. |
 | `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
+| `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session start lock so a future start can fire. |
 
 Parallel mode lets a fast import trim run while a slow ramp is still
 in its stability delay. The trim is purely a ramp-down; the controller
