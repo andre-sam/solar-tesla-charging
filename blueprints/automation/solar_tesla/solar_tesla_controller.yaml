@@ -733,14 +733,13 @@ action:
                   entity_id: !input below_min_flag
           - if:
               - condition: template
-                value_template: "{{ session_lock | length > 0 }}"
-              - condition: state
-                entity_id: !input session_lock
-                state: "on"
+                value_template: >
+                  {{ session_lock | length > 0
+                     and is_state(session_lock, 'on') }}
             then:
               - service: input_boolean.turn_off
                 target:
-                  entity_id: !input session_lock
+                  entity_id: "{{ session_lock }}"
 
       # ─────────────────────────────────────────────────────────────
       # IMPORT-SPIKE TRIM: instantly ramp current down if any grid
@@ -900,14 +899,13 @@ action:
           - condition: template
             value_template: "{{ trigger.id == 'session_ended' }}"
           - condition: template
-            value_template: "{{ session_lock | length > 0 }}"
-          - condition: state
-            entity_id: !input session_lock
-            state: "on"
+            value_template: >
+              {{ session_lock | length > 0
+                 and is_state(session_lock, 'on') }}
         sequence:
           - service: input_boolean.turn_off
             target:
-              entity_id: !input session_lock
+              entity_id: "{{ session_lock }}"
 
       # ─────────────────────────────────────────────────────────────
       # TICK: main ramp / start / SOC-cap / window-end evaluator.
@@ -1221,7 +1219,7 @@ action:
                     then:
                       - service: input_boolean.turn_on
                         target:
-                          entity_id: !input session_lock
+                          entity_id: "{{ session_lock }}"
                   # Always try to wake the car on a restart when a
                   # wake button is provided; covers the case where
                   # status is ambiguous (unknown/unavailable/asleep).
