@@ -467,6 +467,36 @@ blueprint:
         entity:
           domain: input_datetime
 
+    prioritize_load_booleans:
+      name: Prioritize Tesla over these loads (optional)
+      description: >
+        Optional list of input_boolean entities that gate other
+        power-hungry automations (e.g. AC units, pool pump). When
+        the Tesla SOC drops below the threshold during the charging
+        window, the controller turns these OFF so the Tesla gets
+        priority on solar export. They are turned back ON
+        automatically at window close. Leave empty to disable this
+        feature.
+      default: []
+      selector:
+        entity:
+          domain: input_boolean
+          multiple: true
+
+    prioritize_below_soc:
+      name: Prioritize Tesla below SOC (%)
+      description: >
+        Tesla SOC threshold below which the prioritize-loads above
+        are disabled. Only has effect when "Prioritize Tesla over
+        these loads" is configured.
+      default: 40
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
 mode: parallel
 max: 10
 max_exceeded: silent
@@ -513,6 +543,8 @@ variables:
   hard_stop_at_window_end: !input hard_stop_at_window_end
   window_start: !input window_start
   window_end: !input window_end
+  prioritize_load_booleans: !input prioritize_load_booleans
+  prioritize_below_soc: !input prioritize_below_soc
 
 trigger:
   # Main controller evaluator: runs every minute, on HA start, and on
@@ -586,6 +618,12 @@ trigger:
     entity_id: !input enable_toggle
     to: "off"
     id: disabled
+
+  # Window close: restore any prioritize-loads the controller
+  # disabled during the session.
+  - platform: time
+    at: !input window_end
+    id: window_close
 
 action:
   - choose:
@@ -746,6 +784,32 @@ action:
                 Window: {{ states(window_start) }} to {{ states(window_end) }}.
 
       # ─────────────────────────────────────────────────────────────
+      # WINDOW CLOSE: restore prioritize-loads that are currently off.
+      # Runs regardless of enable_toggle so loads never get stuck off
+      # if the user disabled the controller mid-window.
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'window_close' }}"
+          - condition: template
+            value_template: "{{ prioritize_load_booleans | length > 0 }}"
+        sequence:
+          - variables:
+              prioritize_off_loads: >
+                {% set ns = namespace(items=[]) %}
+                {% for e in prioritize_load_booleans %}
+                  {% if states(e) == 'off' %}
+                    {% set ns.items = ns.items + [e] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+          - if:
+              - condition: template
+                value_template: "{{ prioritize_off_loads | length > 0 }}"
+            then:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: "{{ prioritize_off_loads }}"
+
       # DISABLED mid-session: confirm manual abort.
       # ─────────────────────────────────────────────────────────────
       - conditions:
@@ -895,6 +959,34 @@ action:
               guard_trim_recent: >
                 {{ seconds_since_guard_trim | float(99999)
                    < post_trim_fast_recovery_seconds }}
+          # Prioritize Tesla: if SOC is low during the charging
+          # window, turn off the configured load booleans so the
+          # Tesla gets priority on solar export. Filtered to loads
+          # currently ON to keep the logbook clean. The window_close
+          # trigger restores them.
+          - if:
+              - condition: template
+                value_template: >
+                  {{ prioritize_load_booleans | length > 0
+                     and window_open
+                     and soc < prioritize_below_soc }}
+            then:
+              - variables:
+                  prioritize_on_loads: >
+                    {% set ns = namespace(items=[]) %}
+                    {% for e in prioritize_load_booleans %}
+                      {% if states(e) == 'on' %}
+                        {% set ns.items = ns.items + [e] %}
+                      {% endif %}
+                    {% endfor %}
+                    {{ ns.items }}
+              - if:
+                  - condition: template
+                    value_template: "{{ prioritize_on_loads | length > 0 }}"
+                then:
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ prioritize_on_loads }}"
           - choose:
               # ── Branch 1: SOC cap reached ──────────────────────
               - conditions:

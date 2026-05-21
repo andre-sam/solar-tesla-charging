@@ -84,6 +84,9 @@ Optional:
   spikes (e.g. `input_datetime.solar_charging_last_guard_trim`)
 - A **notify service** (e.g. `notify.mobile_app_phone`) for session
   and lifecycle notifications
+- One or more **`input_boolean`** entities that gate other power-
+  hungry automations (AC, pool pump, etc.) you want the controller
+  to pause while the Tesla SOC is low. See [Load prioritisation](#load-prioritisation-optional).
 - **Solcast PV Forecast** daily-total sensors for the forecast boost.
   Pick today, tomorrow, and as many of `day_3` to `day_7` as you
   want (the lookahead input chooses how far ahead to inspect):
@@ -174,6 +177,35 @@ meter only exposes a single signed net sensor, point both controller
 inputs at that same entity. The math still works because
 `net + 0 == net`.
 
+## Load prioritisation (optional)
+
+The controller can pause other power-hungry automations while the
+Tesla is low on charge, so the available solar export goes to the
+car first. Wire each downstream automation behind its own
+`input_boolean` (e.g. `input_boolean.ac_auto_enabled`,
+`input_boolean.pool_pump_auto_enabled`) so the automation only runs
+when its boolean is ON. Then point the controller's **Prioritize
+Tesla over these loads** input at those booleans and pick a SOC
+threshold (default 40 %).
+
+Behaviour:
+
+- While the charging window is open AND the Tesla SOC is below the
+  threshold, the controller turns OFF any of the listed booleans
+  that are currently ON.
+- At the window end time, the controller turns ON any of those
+  booleans that are currently OFF. The restore runs regardless of
+  the master enable toggle so loads never get stuck off.
+- The controller only writes to a boolean when its state would
+  actually change. The logbook stays clean even though the tick
+  branch evaluates every minute.
+- The restore is unconditional at window close: if you have your
+  own reason to keep one of those automations paused beyond the
+  window, gate it from a different switch or pick a separate
+  `input_boolean`.
+
+Leave the input empty to disable the feature entirely.
+
 ## Runtime model
 
 The consolidated controller is a single `mode: parallel` automation.
@@ -182,13 +214,14 @@ branch:
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
-| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. |
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Also pauses prioritize-loads when SOC is low during the window. |
 | `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session and notify. |
 | `ha_start_reconcile` | HA start | Clear a stale below-minimum flag if no session is running. |
 | `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. |
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
 | `disabled` | Enable toggle goes OFF mid-session | Notify. |
+| `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
 
 Parallel mode lets a fast import trim run while a slow ramp is still
 in its stability delay. The trim is purely a ramp-down; the controller
