@@ -4,35 +4,38 @@
 blueprint:
   name: Solar Tesla Charging
   description: >
-    All-in-one ramp-first solar-aware Tesla charging controller. A
-    single automation handles: ramp-up / ramp-down / start / resume,
-    SOC-cap stop, optional hard window-end stop, the below-minimum
-    grace-period stop, instant import-spike current trimming, and
-    plug/toggle lifecycle notifications.
+    Charges a Tesla on a Wall Connector from your solar surplus
+    only, by tracking household consumption and PV output minute by
+    minute. Modulates the car's charge current through the Tesla
+    integration using the Fleet API's 1 A floor (the Tesla app's
+    minimum is 5 A), so the session can run from as little as ~700
+    W of surplus on a 3-phase install and ramp continuously up to
+    the Wall Connector's maximum as export rises. Reacts to grid
+    state changes within seconds rather than at the next minute
+    boundary, so brief appliance spikes don't pin the session at
+    low current and brief sunny gaps aren't exported.
 
 
-    This replaces the older multi-blueprint layout (Controller +
-    Grace Stop + Import Guard + Plugged-In Notify). Trigger IDs
-    route each event to the right action branch; the automation
-    runs in parallel mode so a slow ramp does not block a fast
-    guard trim.
-
-
-    Required helpers:
+    Required helpers (create in HA before importing):
 
       - input_boolean for the master enable toggle
-      - input_boolean for the below-minimum tracker (replaces the
-        shared flag that used to live between blueprints)
+      - input_boolean for the below-minimum tracker (controller
+        writes to it; you don't interact with it directly)
       - two input_datetime helpers (time only) for the charging
         window start / end
 
-    Optional helpers:
+    Optional helpers (leave the matching inputs blank to skip):
 
-      - input_datetime (date + time) the import-spike branch
-        stamps so the controller can skip its stability delay
-        on fast recovery from a brief spike
-      - notify service for SOC-cap, window-close, grace-stop,
-        session-start and lifecycle notifications
+      - input_datetime for fast recovery from import spikes
+      - input_boolean as a session start lock to dedupe
+        "Solar Charging Started" notifications
+      - input_boolean entities for load prioritisation
+      - Solcast PV Forecast sensors for the forecast boost
+      - a notify service for session and lifecycle notifications
+
+
+    Full documentation:
+    https://github.com/andre-sam/solar-tesla-charging
 
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
@@ -90,6 +93,9 @@ blueprint:
 
     vehicle_connected:
       name: Vehicle connected binary sensor
+      description: >
+        Wall connector binary sensor that is ON when a Tesla is
+        plugged into the charger.
       selector:
         entity:
           domain: binary_sensor
@@ -117,12 +123,19 @@ blueprint:
 
     charge_switch:
       name: Tesla charge on/off switch
+      description: >
+        switch.* entity from the Tesla integration that starts and
+        stops the car's charging session.
       selector:
         entity:
           domain: switch
 
     battery_soc:
       name: Tesla battery SOC sensor (%)
+      description: >
+        Sensor reporting the Tesla's current state-of-charge as a
+        percentage (0-100). Used as the stop trigger when SOC
+        reaches the configured cap.
       selector:
         entity:
           domain: sensor
@@ -144,10 +157,9 @@ blueprint:
       name: Tesla wake-up button (optional)
       description: >
         button.* pressed before starting or resuming charging. Leave
-        empty to skip. When provided, it is pressed whenever a restart
-        is attempted, including when the car's status is ambiguous
-        (unknown/unavailable/asleep), which would otherwise block
-        resume.
+        empty to skip. When provided, it is pressed whenever a
+        restart is attempted, including when the car's status is
+        asleep or unknown (which would otherwise block resume).
       default: ""
       selector:
         entity:
@@ -156,12 +168,13 @@ blueprint:
     last_guard_trim:
       name: Last import-spike trim timestamp (optional)
       description: >
-        input_datetime (with date + time) stamped by the import-spike
-        branch on every trim. When set, the controller skips its
-        stability delay for ramp-up steps that happen within the
-        post-trim fast-recovery window, so recovery from a brief
-        import spike isn't held back for a full stability delay.
-        Leave empty to disable fast recovery.
+        input_datetime (with date + time) stamped each time the
+        controller trims current in response to a grid-import
+        spike. When set, the controller skips its stability delay
+        for ramp-up steps that happen within the post-trim
+        fast-recovery window, so recovery from a brief import
+        spike isn't held back for a full stability delay. Leave
+        empty to disable fast recovery.
       default: ""
       selector:
         entity:
@@ -177,6 +190,10 @@ blueprint:
 
     line_voltage:
       name: Line voltage (V)
+      description: >
+        Nominal line voltage of your supply. 230 V for AU / EU
+        (single- or three-phase), 240 V for UK and US 240 V
+        split-phase, 120 V for US 1-phase.
       default: 230
       selector:
         number:
@@ -200,7 +217,11 @@ blueprint:
 
     export_threshold_amps:
       name: Export buffer (A per line)
-      description: Headroom kept between export and charge current.
+      description: >
+        Safety margin kept between available export and the charge
+        current setpoint, in amps per phase. Higher values reduce
+        the risk of brief grid imports at the cost of a small amount
+        of unused export. Set to 0 for the most aggressive tracking.
       default: 1
       selector:
         number:
@@ -223,6 +244,10 @@ blueprint:
 
     max_charge_amps:
       name: Maximum charge current (A)
+      description: >
+        Hardware ceiling for the charge current. Set to your Wall
+        Connector's installed circuit rating (commonly 16 A for AU /
+        EU 3-phase, 32 to 48 A for US single-phase).
       default: 16
       selector:
         number:
@@ -233,6 +258,11 @@ blueprint:
 
     restart_hysteresis_amps:
       name: Restart hysteresis (A)
+      description: >
+        How far above the minimum charge current available export
+        must rise before the controller starts (or restarts) a
+        session. Prevents the controller from oscillating between
+        starting and stopping right at the minimum threshold.
       default: 0.5
       selector:
         number:
@@ -407,6 +437,12 @@ blueprint:
 
     stability_delay_seconds:
       name: Stability delay on ramp-up (s)
+      description: >
+        How long the controller waits between successive ramp-up
+        steps when conditions are stable. Longer values are kinder
+        to the car and the contactor; shorter values track rising
+        solar more aggressively. Automatically skipped during the
+        post-trim fast-recovery window after an import spike.
       default: 60
       selector:
         number:
@@ -539,13 +575,13 @@ blueprint:
       name: Session start lock (optional)
       description: >
         input_boolean used as a re-entry lock to dedupe "Solar
-        Charging Started" notifications when the start branch runs
-        in parallel with its wake/start delay. The controller turns
-        it ON at the very start of a session and OFF when the
-        contactor opens (or on HA restart if it was stuck). Leave
-        empty to disable the lock; duplicate "Started"
-        notifications are then possible if the start branch is
-        re-entered during the 15 s wake delay.
+        Charging Started" notifications when the start logic fires
+        a second time during its 15 s car-wake delay. The
+        controller turns it ON at the very start of a session and
+        OFF when the contactor opens (or on HA restart if it was
+        stuck). Leave empty to disable the lock; duplicate
+        "Started" notifications are then possible if the start
+        logic re-enters during the 15 s wake delay.
       default: ""
       selector:
         entity:
@@ -1245,7 +1281,8 @@ action:
                           entity_id: "{{ session_lock }}"
                   # Always try to wake the car on a restart when a
                   # wake button is provided; covers the case where
-                  # status is ambiguous (unknown/unavailable/asleep).
+                  # status is asleep or unknown (which would
+                  # otherwise block resume).
                   - if:
                       - condition: template
                         value_template: "{{ wake_button | length > 0 }}"
