@@ -1,12 +1,35 @@
 # Solar-Aware Tesla Charging (Home Assistant Blueprint)
 
-Solar-aware charge control for a Tesla on a Wall Connector, via Home
-Assistant. Modulates the car's charge current in 1 A steps through
-the Tesla integration to track available solar export, instead of
-stop/starting the session. Pairs with any grid-monitoring setup that
-exposes import and export power as W sensors (Enphase, Shelly EM,
-Powerwall, Emporia, generic CT clamps via ESPHome, etc.). One
-blueprint, one automation, every behaviour:
+Charges a Tesla on a Wall Connector from your solar surplus only, by
+tracking household consumption and PV output minute by minute.
+
+**Why use it.** The Tesla app and most third-party schedulers force a
+single static charge current. As soon as a cloud passes or an
+appliance turns on, that fixed setpoint is wrong. Set it high and
+the car pulls from the grid whenever solar dips below the
+setpoint. Set it low to avoid imports and you instead export the
+rest of your solar at the low feed-in tariff because the car can't
+absorb it. Either way you're paying for it: the gap between import
+and feed-in tariffs is where the money goes. This blueprint instead
+matches the car's charge current to your real-time solar export, so
+the session runs on the solar your house isn't already consuming.
+The practical effect is more of your own generation ending up in
+the car instead of being exported. In markets where the import
+tariff is meaningfully higher than the feed-in tariff (most of
+Australia, the UK, much of Europe), this also reduces your
+electricity bill: every kWh kept on-site is a kWh you don't buy
+back later at retail.
+
+**How it works.** A single Home Assistant automation reads your
+existing grid import and export sensors (Enphase, Shelly EM,
+Powerwall, Emporia, generic CT clamps via ESPHome, etc.) and
+modulates the Tesla's charge current through the official Tesla
+integration. It uses the Fleet API's 1 A floor instead of the Tesla
+app's 5 A floor, ramps continuously between 1 A (~700 W on 3-phase)
+and the Wall Connector's ~11 kW ceiling, and reacts to grid state
+changes within seconds rather than at the next minute boundary.
+
+## Features
 
 - Ramps current between 1 A and charger max. Never stop/starts unnecessarily.
 - Holds at minimum through short cloud gaps before ending a session,
