@@ -513,6 +513,22 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
+    session_lock:
+      name: Session start lock (optional)
+      description: >
+        input_boolean used as a re-entry lock to dedupe "Solar
+        Charging Started" notifications when the start branch runs
+        in parallel with its wake/start delay. The controller turns
+        it ON at the very start of a session and OFF when the
+        contactor opens (or on HA restart if it was stuck). Leave
+        empty to disable the lock; duplicate "Started"
+        notifications are then possible if the start branch is
+        re-entered during the 15 s wake delay.
+      default: ""
+      selector:
+        entity:
+          domain: input_boolean
+
 mode: parallel
 max: 10
 max_exceeded: silent
@@ -561,6 +577,7 @@ variables:
   window_end: !input window_end
   prioritize_load_booleans: !input prioritize_load_booleans
   prioritize_below_soc: !input prioritize_below_soc
+  session_lock: !input session_lock
 
 trigger:
   # Main controller evaluator: runs every minute, on HA start, and on
@@ -641,6 +658,20 @@ trigger:
     at: !input window_end
     id: window_close
 
+  # Session ended: contactor goes from on to off and stays off for
+  # at least 10 s. Used to clear the optional session_lock so a
+  # future start can fire if the previous session ended naturally
+  # (e.g. car-side stop, fault, unplug) without an explicit branch
+  # clearing the lock. The 10 s debounce ignores brief contactor
+  # flicker during start sequences.
+  - platform: state
+    entity_id: !input contactor_closed
+    from: "on"
+    to: "off"
+    for:
+      seconds: 10
+    id: session_ended
+
 action:
   - choose:
       # ─────────────────────────────────────────────────────────────
@@ -679,23 +710,37 @@ action:
                     {{ states(battery_soc) | round(0) }}%.
 
       # ─────────────────────────────────────────────────────────────
-      # HA START RECONCILE: clear stale flag if no session is live.
-      # Runs regardless of enable_toggle / vehicle_connected so a
-      # leftover flag from before the restart never gets stuck on.
+      # HA START RECONCILE: clear any stale stateful flags if no
+      # session is live. Runs regardless of enable_toggle /
+      # vehicle_connected so leftovers from before the restart
+      # never get stuck on. Handles both the below-minimum tracker
+      # and the optional session start lock.
       # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'ha_start_reconcile' }}"
           - condition: state
-            entity_id: !input below_min_flag
-            state: "on"
-          - condition: state
             entity_id: !input contactor_closed
             state: "off"
         sequence:
-          - service: input_boolean.turn_off
-            target:
-              entity_id: !input below_min_flag
+          - if:
+              - condition: state
+                entity_id: !input below_min_flag
+                state: "on"
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: !input below_min_flag
+          - if:
+              - condition: template
+                value_template: "{{ session_lock | length > 0 }}"
+              - condition: state
+                entity_id: !input session_lock
+                state: "on"
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: !input session_lock
 
       # ─────────────────────────────────────────────────────────────
       # IMPORT-SPIKE TRIM: instantly ramp current down if any grid
@@ -846,6 +891,25 @@ action:
                 evaluation.
 
       # ─────────────────────────────────────────────────────────────
+      # SESSION ENDED: contactor opened and stayed open 10 s.
+      # Clears the optional session_lock so a future start can
+      # fire after a natural session end (car-side stop, fault,
+      # unplug) that wasn't terminated by an explicit branch.
+      # ─────────────────────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'session_ended' }}"
+          - condition: template
+            value_template: "{{ session_lock | length > 0 }}"
+          - condition: state
+            entity_id: !input session_lock
+            state: "on"
+        sequence:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input session_lock
+
+      # ─────────────────────────────────────────────────────────────
       # TICK: main ramp / start / SOC-cap / window-end evaluator.
       # ─────────────────────────────────────────────────────────────
       - conditions:
@@ -864,7 +928,9 @@ action:
                  and states(grid_import_power) | lower not in bad
                  and states(wall_connector_power) | lower not in bad
                  and states(contactor_closed) | lower not in bad
-                 and states(battery_soc) | lower not in bad }}
+                 and states(battery_soc) | lower not in bad
+                 and states(charge_current_number) | lower not in bad
+                 and states(charge_switch) | lower not in bad }}
         sequence:
           - variables:
               # Wall connector power → watts.
@@ -914,6 +980,15 @@ action:
               # gap stops the lookahead. Any unavailable upcoming
               # reading disables the boost (fail-safe).
               forecast_bad_values: "{{ ['unavailable', 'unknown', 'none', ''] }}"
+              # Explicit health gate: boost is disabled outright if
+              # either the "today" or "+1 day" Solcast sensors are
+              # missing or reporting unavailable/unknown. The deeper
+              # checks below remain as a safety net.
+              solcast_healthy: >
+                {{ solcast_today_kwh
+                   and solcast_tomorrow_kwh
+                   and states(solcast_today_kwh) | lower not in forecast_bad_values
+                   and states(solcast_tomorrow_kwh) | lower not in forecast_bad_values }}
               solcast_today_val: >
                 {% if solcast_today_kwh
                    and states(solcast_today_kwh) | lower not in forecast_bad_values %}
@@ -949,6 +1024,7 @@ action:
                 {{ ns.vals }}
               boost_active: >
                 {{ boost_soc > max_soc
+                   and solcast_healthy
                    and solcast_today_val >= boost_today_min_kwh
                    and forecast_upcoming_sensors | length > 0
                    and forecast_upcoming_vals | length
@@ -1126,13 +1202,26 @@ action:
                          and is_state(vehicle_connected, 'on')
                          and status_text not in blocking_statuses
                          and available_amps >= restart_charge_amps
-                         and soc < effective_limit }}
+                         and soc < effective_limit
+                         and (session_lock | length == 0
+                              or is_state(session_lock, 'off')) }}
                 sequence:
                   - variables:
                       target_amps: >
                         {% set raw = [[available_amps, max_charge_amps] | min,
                                       min_charge_amps] | max %}
                         {{ raw | round(0, 'floor') | int }}
+                  # Claim the session lock first so a re-entry of
+                  # this branch during the wake/start sequence is
+                  # blocked by the condition check above. No-op
+                  # when the optional lock helper isn't configured.
+                  - if:
+                      - condition: template
+                        value_template: "{{ session_lock | length > 0 }}"
+                    then:
+                      - service: input_boolean.turn_on
+                        target:
+                          entity_id: !input session_lock
                   # Always try to wake the car on a restart when a
                   # wake button is provided; covers the case where
                   # status is ambiguous (unknown/unavailable/asleep).
