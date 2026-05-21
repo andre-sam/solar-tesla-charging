@@ -1,29 +1,35 @@
 blueprint:
-  name: Solar Tesla Charging — Controller
+  name: Solar Tesla Charging
   description: >
-    Ramp-first solar-aware Tesla charging controller. Adjusts the Tesla
-    charge current based on measured grid export, prefers ramping over
-    stop/start, and is the single source of truth for stop decisions
-    (SOC cap, optional hard window-end stop, below-minimum tracking).
+    All-in-one ramp-first solar-aware Tesla charging controller. A
+    single automation handles: ramp-up / ramp-down / start / resume,
+    SOC-cap stop, optional hard window-end stop, the below-minimum
+    grace-period stop, instant import-spike current trimming, and
+    plug/toggle lifecycle notifications.
 
 
-    This version delegates the grace-period stop to a separate
-    "Grace Stop" companion blueprint via a shared input_boolean
-    ("below-minimum" flag). The Controller only toggles the flag; the
-    companion runs the timer. This keeps the Controller responsive to
-    recovery the moment export climbs back above the minimum.
+    This replaces the older multi-blueprint layout (Controller +
+    Grace Stop + Import Guard + Plugged-In Notify). Trigger IDs
+    route each event to the right action branch; the automation
+    runs in parallel mode so a slow ramp does not block a fast
+    guard trim.
 
-    Pair with:
-      - "Solar Tesla Charging — Grace Stop" (required for session ending)
-      - "Solar Tesla Charging — Grid Import Guard" (optional)
 
-    IMPORTANT — shared inputs: `below_min_flag`, `enable_toggle`,
-    `contactor_closed`, `charge_switch` must match the Grace Stop
-    blueprint exactly. If `last_guard_trim` is used, it must also
-    match the Grid Import Guard's `last_guard_trim`. Home Assistant
-    does not share state between blueprint instances; mismatches
-    fail silently.
+    Required helpers:
 
+      - input_boolean for the master enable toggle
+      - input_boolean for the below-minimum tracker (replaces the
+        shared flag that used to live between blueprints)
+      - two input_datetime helpers (time only) for the charging
+        window start / end
+
+    Optional helpers:
+
+      - input_datetime (date + time) the import-spike branch
+        stamps so the controller can skip its stability delay
+        on fast recovery from a brief spike
+      - notify service for SOC-cap, window-close, grace-stop,
+        session-start and lifecycle notifications
 
   domain: automation
   source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
@@ -38,12 +44,11 @@ blueprint:
     below_min_flag:
       name: Below-minimum tracker (input_boolean)
       description: >
-        Second input_boolean you create (e.g.
-        input_boolean.solar_charging_below_min). The Controller turns
-        this ON while export is below the minimum charge current and
-        OFF as soon as export recovers or the session ends. The
-        companion "Grace Stop" blueprint watches this flag to end the
-        session after the grace period.
+        input_boolean you create (e.g.
+        input_boolean.solar_charging_below_min). Turned ON while
+        export sits below the minimum charge current and OFF as soon
+        as export recovers or the session ends. If it stays ON for
+        the configured grace period, the session is stopped.
       selector:
         entity:
           domain: input_boolean
@@ -53,8 +58,8 @@ blueprint:
       description: >
         Signed net or export-only counter. Must be NEGATIVE when
         exporting to the grid. Some meters expose this as a dedicated
-        export counter that reports ≤0 W; others expose a signed net
-        grid sensor.
+        export counter that reports below 0 W; others expose a signed
+        net grid sensor.
       selector:
         entity:
           domain: sensor
@@ -63,10 +68,10 @@ blueprint:
     grid_import_power:
       name: Grid import power sensor (W, positive when importing)
       description: >
-        Unidirectional import counter (≥0 W). Combined additively with
-        the export sensor so two-counter meters (e.g. Enphase) work
-        correctly. If you only have one signed sensor, point both
-        inputs at it — the math still works.
+        Unidirectional import counter (>= 0 W). Combined additively
+        with the export sensor so two-counter meters (e.g. Enphase)
+        work correctly. If you only have one signed sensor, point
+        both inputs at it.
       selector:
         entity:
           domain: sensor
@@ -142,14 +147,14 @@ blueprint:
           domain: button
 
     last_guard_trim:
-      name: Last Import Guard trim timestamp (optional)
+      name: Last import-spike trim timestamp (optional)
       description: >
-        input_datetime (with date + time) updated by the Grid Import
-        Guard blueprint each time it trims current. When present, the
-        Controller skips the stability delay for ramp-up steps that
-        happen within the "fast recovery" window below, so recovery
-        from a brief import spike (kettle, microwave) isn't held back
-        for a full stability delay. Leave empty to disable.
+        input_datetime (with date + time) stamped by the import-spike
+        branch on every trim. When set, the controller skips its
+        stability delay for ramp-up steps that happen within the
+        post-trim fast-recovery window, so recovery from a brief
+        import spike isn't held back for a full stability delay.
+        Leave empty to disable fast recovery.
       default: ""
       selector:
         entity:
@@ -159,9 +164,6 @@ blueprint:
       name: Notify service (optional)
       description: >
         e.g. notify.mobile_app_phone. Blank disables notifications.
-        Used for SOC-cap stops and hard window-end stops. Solar-
-        exhaustion stops are notified from the companion Grace Stop
-        blueprint.
       default: ""
       selector:
         text:
@@ -251,9 +253,9 @@ blueprint:
       name: Boost SOC cap (%)
       description: >
         Raised SOC cap used on a "last sunny day before bad weather"
-        according to the Solcast forecast inputs below. Should be ≥
-        Preferred SOC cap. Has no effect unless at least the "today"
-        and "+1 day" Solcast sensors are provided.
+        according to the Solcast forecast inputs below. Should be at
+        or above the Preferred SOC cap. Has no effect unless at least
+        the "today" and "+1 day" Solcast sensors are provided.
       default: 90
       selector:
         number:
@@ -263,7 +265,7 @@ blueprint:
           unit_of_measurement: "%"
 
     solcast_today_kwh:
-      name: Solcast forecast — today (kWh) (optional)
+      name: Solcast forecast today (kWh) (optional)
       description: >
         Sensor that reports today's total forecast PV production in kWh
         (e.g. sensor.solcast_pv_forecast_forecast_today). Required to
@@ -274,7 +276,7 @@ blueprint:
           domain: sensor
 
     solcast_tomorrow_kwh:
-      name: Solcast forecast — tomorrow (+1 day, kWh) (optional)
+      name: Solcast forecast tomorrow / +1 day (kWh) (optional)
       description: >
         e.g. sensor.solcast_pv_forecast_forecast_tomorrow. Required to
         enable the forecast boost; leave empty to disable.
@@ -284,7 +286,7 @@ blueprint:
           domain: sensor
 
     solcast_day_3_kwh:
-      name: Solcast forecast — day 3 / +2 days (kWh) (optional)
+      name: Solcast forecast day 3 / +2 days (kWh) (optional)
       description: e.g. sensor.solcast_pv_forecast_forecast_day_3
       default: ""
       selector:
@@ -292,7 +294,7 @@ blueprint:
           domain: sensor
 
     solcast_day_4_kwh:
-      name: Solcast forecast — day 4 / +3 days (kWh) (optional)
+      name: Solcast forecast day 4 / +3 days (kWh) (optional)
       description: e.g. sensor.solcast_pv_forecast_forecast_day_4
       default: ""
       selector:
@@ -300,7 +302,7 @@ blueprint:
           domain: sensor
 
     solcast_day_5_kwh:
-      name: Solcast forecast — day 5 / +4 days (kWh) (optional)
+      name: Solcast forecast day 5 / +4 days (kWh) (optional)
       description: e.g. sensor.solcast_pv_forecast_forecast_day_5
       default: ""
       selector:
@@ -308,7 +310,7 @@ blueprint:
           domain: sensor
 
     solcast_day_6_kwh:
-      name: Solcast forecast — day 6 / +5 days (kWh) (optional)
+      name: Solcast forecast day 6 / +5 days (kWh) (optional)
       description: e.g. sensor.solcast_pv_forecast_forecast_day_6
       default: ""
       selector:
@@ -316,7 +318,7 @@ blueprint:
           domain: sensor
 
     solcast_day_7_kwh:
-      name: Solcast forecast — day 7 / +6 days (kWh) (optional)
+      name: Solcast forecast day 7 / +6 days (kWh) (optional)
       description: e.g. sensor.solcast_pv_forecast_forecast_day_7
       default: ""
       selector:
@@ -327,10 +329,11 @@ blueprint:
       name: Boost lookahead (days)
       description: >
         How many forecast days after today to inspect when deciding
-        whether to boost. ALL inspected days must be ≤ "bad day"
-        threshold AND today must be ≥ "sunny day" threshold to
-        activate the boost. Capped by how many Solcast sensors you
-        provided (in order: tomorrow, day 3, day 4, …, day 7).
+        whether to boost. ALL inspected days must be at or below the
+        "bad day" threshold AND today must be at or above the "sunny
+        day" threshold to activate the boost. Capped by how many
+        Solcast sensors you provided (in order: tomorrow, day 3, day
+        4, ... day 7); the lookahead stops at the first gap.
       default: 2
       selector:
         number:
@@ -340,7 +343,7 @@ blueprint:
           unit_of_measurement: d
 
     boost_today_min_kwh:
-      name: Boost — "sunny today" threshold (kWh)
+      name: Boost "sunny today" threshold (kWh)
       description: >
         Today's forecast must be at or above this to count as sunny
         enough to justify boosting the cap. Set to your typical
@@ -354,7 +357,7 @@ blueprint:
           unit_of_measurement: kWh
 
     boost_bad_day_max_kwh:
-      name: Boost — "bad day" threshold (kWh)
+      name: Boost "bad day" threshold (kWh)
       description: >
         A forecast day is considered "bad" when its total is at or
         below this value.
@@ -379,9 +382,9 @@ blueprint:
     post_trim_fast_recovery_seconds:
       name: Post-trim fast-recovery window (s)
       description: >
-        Only used when "Last Import Guard trim timestamp" is set. If a
-        ramp-up happens within this many seconds of the last Guard
-        trim, the stability delay is skipped so the session recovers
+        Only used when "Last import-spike trim timestamp" is set. If
+        a ramp-up happens within this many seconds of the last trim,
+        the stability delay is skipped so the session recovers
         quickly from a brief import spike.
       default: 180
       selector:
@@ -391,11 +394,53 @@ blueprint:
           step: 30
           unit_of_measurement: s
 
+    stop_grace_seconds:
+      name: Grace at minimum before stopping (s)
+      description: >
+        Hold at minimum amps this long before ending the session when
+        export sits below the minimum charge current. If solar
+        recovers during the window, the timer aborts automatically
+        and no stop happens.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 900
+          step: 30
+          unit_of_measurement: s
+
+    import_threshold_w:
+      name: Import-spike trim threshold (W)
+      description: >
+        Meter-noise filter. Grid import above this triggers an instant
+        current trim. Set above your meter's typical noise floor.
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 500
+          step: 10
+          unit_of_measurement: W
+
+    import_safety_margin_amps:
+      name: Import-spike trim safety margin (A)
+      description: >
+        Extra amps subtracted on top of the computed trim. The
+        computed trim already uses ceiling rounding, so 0 is usually
+        safe; bump to 1 if your meter is twitchy.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 1
+          unit_of_measurement: A
+
     hard_stop_at_window_end:
       name: Hard-stop running session at window end
       description: >
         When off (default), a session that started inside the window is
-        allowed to run past window_end. When on, the Controller ends
+        allowed to run past window_end. When on, the controller ends
         the session as soon as the window closes.
       default: false
       selector:
@@ -405,11 +450,10 @@ blueprint:
       name: Charging window start (input_datetime)
       description: >
         input_datetime helper (time only) defining when the charging
-        window opens. Create once in HA (Settings → Devices &
-        services → Helpers → Date/time, "time only") and point this
-        AND the Plugged-In Notify blueprint's window_start at the
-        same helper so the dashboard becomes the single source of
-        truth.
+        window opens. Create once in HA (Settings -> Devices &
+        services -> Helpers -> Date/time, "time only") and expose it
+        on your dashboard so the window can be changed without
+        editing the automation.
       selector:
         entity:
           domain: input_datetime
@@ -418,13 +462,13 @@ blueprint:
       name: Charging window end (input_datetime)
       description: >
         input_datetime helper (time only) defining when the charging
-        window closes. Must be the same helper used by the
-        Plugged-In Notify blueprint.
+        window closes.
       selector:
         entity:
           domain: input_datetime
 
-mode: single
+mode: parallel
+max: 10
 max_exceeded: silent
 
 variables:
@@ -463,142 +507,103 @@ variables:
   boost_bad_day_max_kwh: !input boost_bad_day_max_kwh
   stability_delay_seconds: !input stability_delay_seconds
   post_trim_fast_recovery_seconds: !input post_trim_fast_recovery_seconds
+  stop_grace_seconds: !input stop_grace_seconds
+  import_threshold_w: !input import_threshold_w
+  import_safety_margin_amps: !input import_safety_margin_amps
   hard_stop_at_window_end: !input hard_stop_at_window_end
   window_start: !input window_start
   window_end: !input window_end
 
 trigger:
+  # Main controller evaluator: runs every minute, on HA start, and on
+  # any meaningful state change. Drives ramp-up / ramp-down / start /
+  # SOC-cap stop / window-end stop / below-minimum flag handling.
   - platform: homeassistant
     event: start
+    id: tick
   - platform: time_pattern
     minutes: "/1"
+    id: tick
   - platform: state
     entity_id: !input grid_export_power_negative
+    id: tick
   - platform: state
     entity_id: !input grid_import_power
+    id: tick
   - platform: state
     entity_id: !input contactor_closed
+    id: tick
   - platform: state
     entity_id: !input vehicle_connected
+    id: tick
   - platform: state
     entity_id: !input wall_connector_status
+    id: tick
   - platform: state
     entity_id: !input battery_soc
+    id: tick
   - platform: state
     entity_id: !input wall_connector_power
+    id: tick
   - platform: state
     entity_id: !input charge_current_number
+    id: tick
 
-condition:
-  - condition: state
-    entity_id: !input enable_toggle
-    state: "on"
-  - condition: state
+  # Grace stop: if the below-minimum flag stays on for the full grace
+  # window, the session is ended. If export recovers before then, the
+  # tick branch clears the flag and this trigger silently aborts.
+  - platform: state
+    entity_id: !input below_min_flag
+    to: "on"
+    for:
+      seconds: !input stop_grace_seconds
+    id: grace_expired
+
+  # Startup reconciliation: clear a stale below-minimum flag if no
+  # session is running. The "for:" on grace_expired above does not
+  # fire for transitions that happened before HA restarted.
+  - platform: homeassistant
+    event: start
+    id: ha_start_reconcile
+
+  # Import-spike trim: any change to grid import re-evaluates whether
+  # we need to ramp down immediately. The action condition filters on
+  # the threshold.
+  - platform: state
+    entity_id: !input grid_import_power
+    id: import_spike
+
+  # Lifecycle notifications.
+  - platform: state
     entity_id: !input vehicle_connected
-    state: "on"
-  # Sensor health
-  - condition: template
-    value_template: >
-      {% set bad = ['unavailable', 'unknown', 'none', ''] %}
-      {{ states(grid_export_power_negative) | lower not in bad
-         and states(grid_import_power) | lower not in bad
-         and states(wall_connector_power) | lower not in bad
-         and states(contactor_closed) | lower not in bad
-         and states(battery_soc) | lower not in bad }}
+    to: "on"
+    id: plugged_in
+  - platform: state
+    entity_id: !input enable_toggle
+    to: "on"
+    id: enabled
+  - platform: state
+    entity_id: !input enable_toggle
+    to: "off"
+    id: disabled
 
 action:
-  - variables:
-      # Wall connector power → watts
-      wall_power_raw: "{{ states(wall_connector_power) | float(0) }}"
-      wall_power_unit: "{{ state_attr(wall_connector_power, 'unit_of_measurement') | default('W', true) | lower }}"
-      wall_power_w: "{{ (wall_power_raw * 1000) if 'kw' in wall_power_unit else wall_power_raw }}"
-      # Effective export (W) adds back the charger's own draw.
-      # Net grid = import (≥0) + export_negative (≤0). Negative net = exporting.
-      # Flip the sign so grid_export_w is positive when exporting.
-      grid_export_w: >
-        {{ -((states(grid_import_power) | float(0))
-             + (states(grid_export_power_negative) | float(0))) }}
-      effective_export_w: "{{ grid_export_w + wall_power_w }}"
-      effective_export_a: >
-        {{ (effective_export_w / line_voltage) if effective_export_w > 0 else 0 }}
-      available_amps: >
-        {% set a = (effective_export_a / phase_count) - export_threshold_amps %}
-        {{ [[a, 0] | max, max_charge_amps_cfg] | min | round(1) }}
-      min_charge_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
-      max_charge_amps: >
-        {{ [[state_attr(charge_current_number, 'max') | float(max_charge_amps_cfg),
-             max_charge_amps_cfg] | min,
-            min_charge_amps_cfg] | max }}
-      restart_charge_amps: "{{ min_charge_amps + restart_hysteresis_amps }}"
-      current_set_amps: "{{ states(charge_current_number) | float(0) }}"
-      status_text: "{{ states(wall_connector_status) | lower }}"
-      # Blocking statuses that prevent a restart attempt. 'unknown',
-      # 'unavailable' and 'asleep' are deliberately NOT blockers — we
-      # try to wake the car instead.
-      blocking_statuses: "{{ ['fault', 'faulted', 'error', 'offline'] }}"
-      soc: "{{ states(battery_soc) | float(0) }}"
-      tesla_limit: >
-        {% if charge_limit_number %}
-          {{ states(charge_limit_number) | float(max_soc) }}
-        {% else %}
-          {{ max_soc }}
-        {% endif %}
-      # ── Solcast forecast boost ───────────────────────────────────
-      # Active when today's forecast is "sunny" AND every inspected
-      # upcoming day is "bad". Lookahead is capped by how many of the
-      # +1/+2/+3 sensors you actually configured. Any missing or
-      # unavailable upcoming reading disables the boost (fail-safe).
-      forecast_bad_values: "{{ ['unavailable', 'unknown', 'none', ''] }}"
-      solcast_today_val: >
-        {% if solcast_today_kwh and states(solcast_today_kwh) | lower not in forecast_bad_values %}
-          {{ states(solcast_today_kwh) | float(-1) }}
-        {% else %}
-          -1ay_3_kwh, solcast_day_4_kwh,
-                    solcast_day_5_kwh, solcast_day_6_kwh, solcast_day_7
-        {% endif %}
-      forecast_upcoming_sensors: >
-        {% set s = [solcast_tomorrow_kwh, solcast_d2_kwh, solcast_d3_kwh]
-           | select | list %}
-        {{ s[:boost_lookahead_days | int] }}
-      forecast_upcoming_vals: >
-        {% set ns = namespace(vals=[]) %}
-        {% for s in forecast_upcoming_sensors %}
-          {% if states(s) | lower not in forecast_bad_values %}
-            {% set ns.vals = ns.vals + [states(s) | float(-1)] %}
-          {% endif %}
-        {% endfor %}
-        {{ ns.vals }}
-      boost_active: >
-        {{ boost_soc > max_soc
-           and solcast_today_val >= boost_today_min_kwh
-           and forecast_upcoming_sensors | length > 0
-           and forecast_upcoming_vals | length == forecast_upcoming_sensors | length
-           and forecast_upcoming_vals | max <= boost_bad_day_max_kwh }}
-      preferred_cap: "{{ boost_soc if boost_active else max_soc }}"
-      effective_limit: "{{ [preferred_cap, tesla_limit] | min }}"
-      now_time: "{{ now().strftime('%H:%M:%S') }}"
-      window_start_str: "{{ states(window_start) }}"
-      window_end_str: "{{ states(window_end) }}"
-      window_open: "{{ window_start_str <= now_time < window_end_str }}"
-      flag_on: "{{ is_state(below_min_flag, 'on') }}"
-      seconds_since_guard_trim: >
-        {% if last_guard_trim %}
-          {% set ts = state_attr(last_guard_trim, 'timestamp') %}
-          {% if ts is not none %}
-            {{ now().timestamp() - (ts | float(0)) }}
-          {% else %}
-            99999
-          {% endif %}
-        {% else %}
-          99999
-        {% endif %}
-      guard_trim_recent: "{{ seconds_since_guard_trim | float(99999) < post_trim_fast_recovery_seconds }}"
   - choose:
-      # ── Branch 1: SOC cap reached ─────────────────────────────────
+      # ─────────────────────────────────────────────────────────────
+      # GRACE EXPIRED: end session after grace period at minimum.
+      # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
-            value_template: >
-              {{ is_state(contactor_closed, 'on') and soc >= effective_limit }}
+            value_template: "{{ trigger.id == 'grace_expired' }}"
+          - condition: state
+            entity_id: !input enable_toggle
+            state: "on"
+          - condition: state
+            entity_id: !input below_min_flag
+            state: "on"
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "on"
         sequence:
           - service: switch.turn_off
             target:
@@ -612,163 +617,471 @@ action:
             then:
               - service: "{{ notify_service }}"
                 data:
-                  title: "🔋 Tesla Fully Charged (Solar)"
+                  title: "☁️ Solar Session Ended"
                   message: >
-                    Tesla reached {{ soc | round(0) }}% (limit {{ effective_limit | round(0) }}%{% if boost_active %}, forecast boost{% endif %}).
-                    Solar charging stopped.
+                    Solar export stayed below minimum for
+                    {{ (stop_grace_seconds | int // 60) }} min.
+                    Charging stopped at
+                    {{ states(battery_soc) | round(0) }}%.
 
-      # ── Branch 2: Hard stop at window end (optional) ──────────────
+      # ─────────────────────────────────────────────────────────────
+      # HA START RECONCILE: clear stale flag if no session is live.
+      # Runs regardless of enable_toggle / vehicle_connected so a
+      # leftover flag from before the restart never gets stuck on.
+      # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
-            value_template: >
-              {{ hard_stop_at_window_end
-                 and is_state(contactor_closed, 'on')
-                 and not window_open }}
-        sequence:
-          - service: switch.turn_off
-            target:
-              entity_id: !input charge_switch
-          - service: input_boolean.turn_off
-            target:
-              entity_id: !input below_min_flag
-          - if:
-              - condition: template
-                value_template: "{{ notify_service | length > 0 }}"
-            then:
-              - service: "{{ notify_service }}"
-                data:
-                  title: "⏱️ Solar Window Closed"
-                  message: >
-                    Charging window ended ({{ window_start_str }}–{{ window_end_str }}).
-                    Solar session stopped at {{ soc | round(0) }}%.
-
-      # ── Branch 3: Below minimum — hold at min, raise flag ─────────
-      # The companion "Grace Stop" blueprint will end the session if
-      # this flag stays on for the configured grace period.
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ is_state(contactor_closed, 'on')
-                 and available_amps < min_charge_amps }}
-        sequence:
-          - if:
-              - condition: template
-                value_template: "{{ (current_set_amps | int) != (min_charge_amps | int) }}"
-            then:
-              - service: number.set_value
-                target:
-                  entity_id: !input charge_current_number
-                data:
-                  value: "{{ min_charge_amps | round(0) | int }}"
-          - if:
-              - condition: template
-                value_template: "{{ not flag_on }}"
-            then:
-              - service: input_boolean.turn_on
-                target:
-                  entity_id: !input below_min_flag
-
-      # ── Branch 4: Recovered from below-minimum — clear flag ──────
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ flag_on
-                 and (is_state(contactor_closed, 'off')
-                      or available_amps >= min_charge_amps) }}
+            value_template: "{{ trigger.id == 'ha_start_reconcile' }}"
+          - condition: state
+            entity_id: !input below_min_flag
+            state: "on"
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "off"
         sequence:
           - service: input_boolean.turn_off
             target:
               entity_id: !input below_min_flag
 
-      # ── Branch 5: Start / resume ──────────────────────────────────
+      # ─────────────────────────────────────────────────────────────
+      # IMPORT-SPIKE TRIM: instantly ramp current down if any grid
+      # import is detected above the noise threshold. Ramps down
+      # only; never stops the session (the tick branch owns stops).
+      # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
+            value_template: "{{ trigger.id == 'import_spike' }}"
+          - condition: state
+            entity_id: !input enable_toggle
+            state: "on"
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "on"
+          - condition: template
             value_template: >
-              {{ is_state(contactor_closed, 'off')
-                 and window_open
-                 and is_state(vehicle_connected, 'on')
-                 and status_text not in blocking_statuses
-                 and available_amps >= restart_charge_amps
-                 and soc < effective_limit }}
+              {{ states(grid_import_power) | float(0) > import_threshold_w }}
+          - condition: template
+            value_template: >
+              {{ (states(charge_current_number) | int)
+                 > (min_charge_amps_cfg | int) }}
         sequence:
           - variables:
-              target_amps: >
-                {% set raw = [[available_amps, max_charge_amps] | min, min_charge_amps] | max %}
-                {{ raw | round(0, 'floor') | int }}
-          # Always try to wake the car on a restart if a wake button is
-          # provided — covers the case where status is ambiguous
-          # (unknown/unavailable/asleep) after a mid-session sleep.
+              import_w: "{{ states(grid_import_power) | float(0) }}"
+              current_set_amps: "{{ states(charge_current_number) | float(0) }}"
+              min_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
+              # 230 V * 3 phases = 690 W per 1 A of charge current.
+              watts_per_amp: "{{ line_voltage * phase_count }}"
+              # Ceiling division covers the fractional amp; the
+              # safety margin adds any further cushion (default 0).
+              reduce_by: >
+                {{ ((import_w / watts_per_amp) | round(0, 'ceil') | int)
+                   + (import_safety_margin_amps | int) }}
+              reduced_amps: >
+                {{ [(current_set_amps | int) - reduce_by,
+                    (min_amps | int)] | max }}
+          # Stamp the trim timestamp FIRST so under heavy sensor
+          # chatter the controller still sees a recent trim marker
+          # even if number.set_value below is preempted.
           - if:
               - condition: template
-                value_template: "{{ wake_button | length > 0 }}"
+                value_template: "{{ last_guard_trim | length > 0 }}"
             then:
-              - service: button.press
+              - service: input_datetime.set_datetime
                 target:
-                  entity_id: !input wake_button
-              - delay:
-                  seconds: 15
+                  entity_id: !input last_guard_trim
+                data:
+                  datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
           - service: number.set_value
             target:
               entity_id: !input charge_current_number
             data:
-              value: "{{ target_amps }}"
-          - delay:
-              seconds: 3
-          - service: switch.turn_on
-            target:
-              entity_id: !input charge_switch
-          - service: input_boolean.turn_off
-            target:
-              entity_id: !input below_min_flag
-          - if:
-              - condition: template
-                value_template: "{{ notify_service | length > 0 }}"
-            then:
-              - service: "{{ notify_service }}"
-                data:
-                  title: "☀️ Solar Charging Started"
-                  message: >
-                    Session started at {{ target_amps }} A
-                    (SOC {{ soc | round(0) }}%, limit
-                    {{ effective_limit | round(0) }}%{% if boost_active %},
-                    forecast boost: today {{ solcast_today_val | round(1) }} kWh,
-                    next {{ forecast_upcoming_vals | length }}d ≤
-                    {{ boost_bad_day_max_kwh }} kWh{% endif %}).
+              value: "{{ reduced_amps }}"
 
-      # ── Branch 6: Adjust while charging ───────────────────────────
-      # No window_open check here unless hard_stop_at_window_end is on
-      # (Branch 2 handles that case). Branches 1 and 3 take precedence.
+      # ─────────────────────────────────────────────────────────────
+      # PLUGGED IN: notify based on whether solar charging is armed.
+      # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
+            value_template: "{{ trigger.id == 'plugged_in' }}"
+          - condition: template
+            value_template: "{{ notify_service | length > 0 }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: state
+                    entity_id: !input enable_toggle
+                    state: "off"
+                sequence:
+                  - service: "{{ notify_service }}"
+                    data:
+                      title: "🔌 Tesla Plugged In"
+                      message: >
+                        Tesla plugged in but solar charging is disabled.
+                        Window: {{ states(window_start) }} to {{ states(window_end) }}.
+            default:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "☀️ Solar Charging Armed"
+                  message: >
+                    Tesla plugged in; solar charging will run during the
+                    window ({{ states(window_start) }} to {{ states(window_end) }}).
+
+      # ─────────────────────────────────────────────────────────────
+      # ENABLED while already plugged in: confirm.
+      # ─────────────────────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'enabled' }}"
+          - condition: state
+            entity_id: !input vehicle_connected
+            state: "on"
+          - condition: template
+            value_template: "{{ notify_service | length > 0 }}"
+        sequence:
+          - service: "{{ notify_service }}"
+            data:
+              title: "☀️ Solar Charging Enabled"
+              message: >
+                Solar charging enabled with Tesla already plugged in.
+                Window: {{ states(window_start) }} to {{ states(window_end) }}.
+
+      # ─────────────────────────────────────────────────────────────
+      # DISABLED mid-session: confirm manual abort.
+      # ─────────────────────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'disabled' }}"
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "on"
+          - condition: template
+            value_template: "{{ notify_service | length > 0 }}"
+        sequence:
+          - service: "{{ notify_service }}"
+            data:
+              title: "⏹️ Solar Charging Disabled"
+              message: >
+                Solar charging disabled while a session was running.
+                The controller will stop the charger on its next
+                evaluation.
+
+      # ─────────────────────────────────────────────────────────────
+      # TICK: main ramp / start / SOC-cap / window-end evaluator.
+      # ─────────────────────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'tick' }}"
+          - condition: state
+            entity_id: !input enable_toggle
+            state: "on"
+          - condition: state
+            entity_id: !input vehicle_connected
+            state: "on"
+          - condition: template
             value_template: >
-              {{ is_state(contactor_closed, 'on')
-                 and available_amps >= min_charge_amps
-                 and soc < effective_limit }}
+              {% set bad = ['unavailable', 'unknown', 'none', ''] %}
+              {{ states(grid_export_power_negative) | lower not in bad
+                 and states(grid_import_power) | lower not in bad
+                 and states(wall_connector_power) | lower not in bad
+                 and states(contactor_closed) | lower not in bad
+                 and states(battery_soc) | lower not in bad }}
         sequence:
           - variables:
-              target_amps: >
-                {% set current = current_set_amps | int %}
-                {% set raw = [[available_amps, max_charge_amps] | min, min_charge_amps] | max | round(0, 'floor') | int %}
-                {% if raw > current %}
-                  {{ [raw, current + 1] | min }}
+              # Wall connector power → watts.
+              wall_power_raw: "{{ states(wall_connector_power) | float(0) }}"
+              wall_power_unit: >
+                {{ state_attr(wall_connector_power, 'unit_of_measurement')
+                   | default('W', true) | lower }}
+              wall_power_w: >
+                {{ (wall_power_raw * 1000) if 'kw' in wall_power_unit
+                   else wall_power_raw }}
+              # Effective export (W) adds back the charger's own draw.
+              # Net grid = import (>=0) + export_negative (<=0).
+              # Negative net = exporting; flip sign so grid_export_w
+              # is positive when exporting.
+              grid_export_w: >
+                {{ -((states(grid_import_power) | float(0))
+                     + (states(grid_export_power_negative) | float(0))) }}
+              effective_export_w: "{{ grid_export_w + wall_power_w }}"
+              effective_export_a: >
+                {{ (effective_export_w / line_voltage)
+                   if effective_export_w > 0 else 0 }}
+              available_amps: >
+                {% set a = (effective_export_a / phase_count) - export_threshold_amps %}
+                {{ [[a, 0] | max, max_charge_amps_cfg] | min | round(1) }}
+              min_charge_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
+              max_charge_amps: >
+                {{ [[state_attr(charge_current_number, 'max') | float(max_charge_amps_cfg),
+                     max_charge_amps_cfg] | min,
+                    min_charge_amps_cfg] | max }}
+              restart_charge_amps: "{{ min_charge_amps + restart_hysteresis_amps }}"
+              current_set_amps: "{{ states(charge_current_number) | float(0) }}"
+              status_text: "{{ states(wall_connector_status) | lower }}"
+              # 'unknown', 'unavailable' and 'asleep' are deliberately
+              # NOT blockers; we try to wake the car instead.
+              blocking_statuses: "{{ ['fault', 'faulted', 'error', 'offline'] }}"
+              soc: "{{ states(battery_soc) | float(0) }}"
+              tesla_limit: >
+                {% if charge_limit_number %}
+                  {{ states(charge_limit_number) | float(max_soc) }}
                 {% else %}
-                  {{ raw }}
+                  {{ max_soc }}
                 {% endif %}
-              is_ramp_up: "{{ (target_amps | int) > (current_set_amps | int) }}"
-          - if:
-              - condition: template
-                value_template: "{{ target_amps | int != (current_set_amps | int) }}"
-            then:
-              - service: number.set_value
-                target:
-                  entity_id: !input charge_current_number
-                data:
-                  value: "{{ target_amps }}"
-              # Skip stability delay during the post-trim fast-recovery
-              # window so brief import spikes don't pin us low.
-              - if:
+              # ── Solcast forecast boost ─────────────────────────
+              # Active when today's forecast is "sunny" AND every
+              # inspected upcoming day is "bad". Lookahead is capped
+              # by how many sensors you configured, in order; any
+              # gap stops the lookahead. Any unavailable upcoming
+              # reading disables the boost (fail-safe).
+              forecast_bad_values: "{{ ['unavailable', 'unknown', 'none', ''] }}"
+              solcast_today_val: >
+                {% if solcast_today_kwh
+                   and states(solcast_today_kwh) | lower not in forecast_bad_values %}
+                  {{ states(solcast_today_kwh) | float(-1) }}
+                {% else %}
+                  -1
+                {% endif %}
+              forecast_upcoming_sensors: >
+                {% set all_upcoming = [solcast_tomorrow_kwh,
+                                       solcast_day_3_kwh,
+                                       solcast_day_4_kwh,
+                                       solcast_day_5_kwh,
+                                       solcast_day_6_kwh,
+                                       solcast_day_7_kwh] %}
+                {% set ns = namespace(sensors=[], stop=false) %}
+                {% for s in all_upcoming %}
+                  {% if not ns.stop %}
+                    {% if s %}
+                      {% set ns.sensors = ns.sensors + [s] %}
+                    {% else %}
+                      {% set ns.stop = true %}
+                    {% endif %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.sensors[:boost_lookahead_days | int] }}
+              forecast_upcoming_vals: >
+                {% set ns = namespace(vals=[]) %}
+                {% for s in forecast_upcoming_sensors %}
+                  {% if states(s) | lower not in forecast_bad_values %}
+                    {% set ns.vals = ns.vals + [states(s) | float(-1)] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.vals }}
+              boost_active: >
+                {{ boost_soc > max_soc
+                   and solcast_today_val >= boost_today_min_kwh
+                   and forecast_upcoming_sensors | length > 0
+                   and forecast_upcoming_vals | length
+                       == forecast_upcoming_sensors | length
+                   and forecast_upcoming_vals | max <= boost_bad_day_max_kwh }}
+              preferred_cap: "{{ boost_soc if boost_active else max_soc }}"
+              effective_limit: "{{ [preferred_cap, tesla_limit] | min }}"
+              now_time: "{{ now().strftime('%H:%M:%S') }}"
+              window_start_str: "{{ states(window_start) }}"
+              window_end_str: "{{ states(window_end) }}"
+              window_open: "{{ window_start_str <= now_time < window_end_str }}"
+              flag_on: "{{ is_state(below_min_flag, 'on') }}"
+              seconds_since_guard_trim: >
+                {% if last_guard_trim %}
+                  {% set ts = state_attr(last_guard_trim, 'timestamp') %}
+                  {% if ts is not none %}
+                    {{ now().timestamp() - (ts | float(0)) }}
+                  {% else %}
+                    99999
+                  {% endif %}
+                {% else %}
+                  99999
+                {% endif %}
+              guard_trim_recent: >
+                {{ seconds_since_guard_trim | float(99999)
+                   < post_trim_fast_recovery_seconds }}
+          - choose:
+              # ── Branch 1: SOC cap reached ──────────────────────
+              - conditions:
                   - condition: template
-                    value_template: "{{ is_ramp_up and not guard_trim_recent }}"
-                then:
+                    value_template: >
+                      {{ is_state(contactor_closed, 'on')
+                         and soc >= effective_limit }}
+                sequence:
+                  - service: switch.turn_off
+                    target:
+                      entity_id: !input charge_switch
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: !input below_min_flag
+                  - if:
+                      - condition: template
+                        value_template: "{{ notify_service | length > 0 }}"
+                    then:
+                      - service: "{{ notify_service }}"
+                        data:
+                          title: "🔋 Tesla Fully Charged (Solar)"
+                          message: >
+                            Tesla reached {{ soc | round(0) }}% (limit
+                            {{ effective_limit | round(0) }}%{% if boost_active %},
+                            forecast boost{% endif %}).
+                            Solar charging stopped.
+
+              # ── Branch 2: Hard stop at window end (optional) ───
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ hard_stop_at_window_end
+                         and is_state(contactor_closed, 'on')
+                         and not window_open }}
+                sequence:
+                  - service: switch.turn_off
+                    target:
+                      entity_id: !input charge_switch
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: !input below_min_flag
+                  - if:
+                      - condition: template
+                        value_template: "{{ notify_service | length > 0 }}"
+                    then:
+                      - service: "{{ notify_service }}"
+                        data:
+                          title: "⏱️ Solar Window Closed"
+                          message: >
+                            Charging window ended ({{ window_start_str }} to {{ window_end_str }}).
+                            Solar session stopped at {{ soc | round(0) }}%.
+
+              # Branch 3: Below minimum, hold at min, raise flag.
+              # The grace_expired trigger ends the session if the
+              # flag stays on through the grace window.
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ is_state(contactor_closed, 'on')
+                         and available_amps < min_charge_amps }}
+                sequence:
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ (current_set_amps | int)
+                             != (min_charge_amps | int) }}
+                    then:
+                      - service: number.set_value
+                        target:
+                          entity_id: !input charge_current_number
+                        data:
+                          value: "{{ min_charge_amps | round(0) | int }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ not flag_on }}"
+                    then:
+                      - service: input_boolean.turn_on
+                        target:
+                          entity_id: !input below_min_flag
+
+              # Branch 4: Recovered from below-minimum, clear flag.
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ flag_on
+                         and (is_state(contactor_closed, 'off')
+                              or available_amps >= min_charge_amps) }}
+                sequence:
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: !input below_min_flag
+
+              # ── Branch 5: Start / resume ───────────────────────
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ is_state(contactor_closed, 'off')
+                         and window_open
+                         and is_state(vehicle_connected, 'on')
+                         and status_text not in blocking_statuses
+                         and available_amps >= restart_charge_amps
+                         and soc < effective_limit }}
+                sequence:
+                  - variables:
+                      target_amps: >
+                        {% set raw = [[available_amps, max_charge_amps] | min,
+                                      min_charge_amps] | max %}
+                        {{ raw | round(0, 'floor') | int }}
+                  # Always try to wake the car on a restart when a
+                  # wake button is provided; covers the case where
+                  # status is ambiguous (unknown/unavailable/asleep).
+                  - if:
+                      - condition: template
+                        value_template: "{{ wake_button | length > 0 }}"
+                    then:
+                      - service: button.press
+                        target:
+                          entity_id: !input wake_button
+                      - delay:
+                          seconds: 15
+                  - service: number.set_value
+                    target:
+                      entity_id: !input charge_current_number
+                    data:
+                      value: "{{ target_amps }}"
                   - delay:
-                      seconds: "{{ stability_delay_seconds }}"
+                      seconds: 3
+                  - service: switch.turn_on
+                    target:
+                      entity_id: !input charge_switch
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: !input below_min_flag
+                  - if:
+                      - condition: template
+                        value_template: "{{ notify_service | length > 0 }}"
+                    then:
+                      - service: "{{ notify_service }}"
+                        data:
+                          title: "☀️ Solar Charging Started"
+                          message: >
+                            Session started at {{ target_amps }} A
+                            (SOC {{ soc | round(0) }}%, limit
+                            {{ effective_limit | round(0) }}%{% if boost_active %},
+                            forecast boost: today {{ solcast_today_val | round(1) }} kWh,
+                            next {{ forecast_upcoming_vals | length }}d at or below
+                            {{ boost_bad_day_max_kwh }} kWh{% endif %}).
+
+              # ── Branch 6: Adjust while charging ────────────────
+              # No window_open check here unless hard_stop_at_window_end
+              # is on (Branch 2 handles that). Branches 1 and 3 take
+              # precedence over this branch.
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ is_state(contactor_closed, 'on')
+                         and available_amps >= min_charge_amps
+                         and soc < effective_limit }}
+                sequence:
+                  - variables:
+                      target_amps: >
+                        {% set current = current_set_amps | int %}
+                        {% set raw = [[available_amps, max_charge_amps] | min,
+                                      min_charge_amps] | max | round(0, 'floor') | int %}
+                        {% if raw > current %}
+                          {{ [raw, current + 1] | min }}
+                        {% else %}
+                          {{ raw }}
+                        {% endif %}
+                      is_ramp_up: >
+                        {{ (target_amps | int) > (current_set_amps | int) }}
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ target_amps | int != (current_set_amps | int) }}
+                    then:
+                      - service: number.set_value
+                        target:
+                          entity_id: !input charge_current_number
+                        data:
+                          value: "{{ target_amps }}"
+                      # Skip stability delay during the post-trim
+                      # fast-recovery window so brief import spikes
+                      # don't pin us low.
+                      - if:
+                          - condition: template
+                            value_template: "{{ is_ramp_up and not guard_trim_recent }}"
+                        then:
+                          - delay:
+                              seconds: "{{ stability_delay_seconds }}"

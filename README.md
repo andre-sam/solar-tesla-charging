@@ -1,85 +1,92 @@
-# Solar-Aware Tesla Charging (Home Assistant Blueprints)
+# Solar-Aware Tesla Charging (Home Assistant Blueprint)
 
 Ramp-first solar charging control for a Tesla Wall Connector using any
-grid-power sensor pair (Enphase, Shelly EM, Powerwall, etc.).
+grid-power sensor pair (Enphase, Shelly EM, Powerwall, etc.). One
+blueprint, one automation, every behaviour:
 
-- Ramps current between 1 A and charger max — never stop/starts unnecessarily.
-- Holds at minimum through short cloud gaps before ending a session.
-- Separate grid-import guard trims current instantly if any appliance kicks in.
-- Fast recovery after a brief import spike: the Guard can stamp an
-  `input_datetime` the Controller reads to skip its stability delay.
-- Uses Tesla Fleet API's 1 A floor (≈ 690 W on 3-phase), not the app's 5 A.
-- Works with 1-, 2-, or 3-phase installs (configurable line voltage and phase count).
-- SOC-aware: the Controller is the single source of truth for the SOC
-  cap stop (optional notify).
-- Session end notifications for SOC-cap, window-end (optional hard
-  stop) and solar-exhaustion paths.
+- Ramps current between 1 A and charger max. Never stop/starts unnecessarily.
+- Holds at minimum through short cloud gaps before ending a session,
+  with a configurable grace period; if export recovers, the grace
+  timer aborts automatically.
+- Instant grid-import guard: trims current the moment any appliance
+  causes net import.
+- Fast recovery after a brief import spike. The guard stamps an
+  `input_datetime` the same automation reads to skip its stability
+  delay so a kettle pulse doesn't pin charging low.
+- Uses Tesla Fleet API's 1 A floor (about 690 W on 3-phase), not the
+  app's 5 A.
+- Works with 1-, 2-, or 3-phase installs (configurable line voltage
+  and phase count).
+- SOC-aware: stops at the lower of the configured cap and the Tesla
+  car-side charge limit.
+- Lifecycle notifications: plug-in (whether solar charging is armed
+  or not), enable while plugged in, disable mid-session.
+- Session-end notifications for SOC cap, optional hard window-end
+  stop, and solar-exhaustion stop.
 - Wakes an ambiguous-status Tesla on resume so a mid-session sleep
   doesn't block restart.
 - Optional **Solcast forecast boost**: raises the SOC cap on a sunny
-  day when the next 1–3 days are forecast to be poor, so you stash
-  extra charge before bad weather. Disabled by default; activates only
-  when Solcast sensors are configured.
-- Grace-period stop lives in a separate companion automation so the
-  Controller stays responsive: if export recovers, the timer aborts.
+  day when the next 1 to 6 days are forecast to be poor, so you
+  stash extra charge before bad weather. Disabled by default;
+  activates only when Solcast sensors are configured.
 
 ## Blueprints
 
-The **Controller** + **Grace Stop** pair is the minimum viable install.
-The others are optional enhancements.
-
 | Blueprint | Purpose |
 |---|---|
-| `solar_tesla_controller.yaml` | Main ramp-up / ramp-down / start / resume / SOC-cap stop. Toggles the below-minimum flag. |
-| `solar_tesla_grace_stop.yaml` | Ends the session after the below-minimum flag has stayed on for the grace period. |
-| `solar_tesla_import_guard.yaml` | Instant current cut on any grid import. Optionally stamps a trim timestamp the Controller reads for fast recovery. |
-| `solar_tesla_plugged_in_notify.yaml` | Notifies when plugged in (whether solar charging is off or on) and when the toggle is enabled while already plugged in. |
-| `solar_tesla_stop_at_soc.yaml` | **Deprecated.** The Controller now handles the SOC cap stop itself. Kept only for users who already imported it. |
+| `solar_tesla_controller.yaml` | Single all-in-one automation. Controls ramp / start / stop, runs the import-spike trim, the below-minimum grace stop, and the plug/toggle lifecycle notifications. |
+| `solar_tesla_stop_at_soc.yaml` | **Deprecated.** The controller now handles the SOC cap stop itself. Kept only for users who already imported it. |
+
+Earlier versions of this repo split the behaviour across four
+blueprints (Controller + Grace Stop + Import Guard + Plugged-In
+Notify). The consolidated controller absorbs all four. If you're
+upgrading, delete the three retired blueprints and the automations
+they powered, then import the new controller and configure it once.
 
 ## Import
 
-In Home Assistant: **Settings → Automations → Blueprints → Import Blueprint**,
-then paste the raw GitHub URL of each YAML you want.
+In Home Assistant: **Settings -> Automations -> Blueprints -> Import
+Blueprint**, then paste the raw GitHub URL of
+`solar_tesla_controller.yaml`.
 
 ## Required entities
 
 You need these from your installation (any integration, any names):
 
-- A **grid export power** sensor in W (≤ 0 when exporting — signed net or
-  dedicated export counter)
-- A **grid import power** sensor in W (≥ 0 when importing — dedicated
-  import counter, or the same signed sensor as above)
+- A **grid export power** sensor in W (at or below 0 when exporting:
+  signed net or dedicated export counter)
+- A **grid import power** sensor in W (at or above 0 when importing:
+  dedicated import counter, or the same signed sensor as above)
 - A **wall connector power** sensor in W or kW
 - A **wall connector vehicle-connected** binary sensor
 - A **wall connector contactor-closed** binary sensor
+- A **wall connector status** sensor (text)
 - A **Tesla charge current** `number` entity (amps)
 - A **Tesla charge switch** (on/off)
 - A **Tesla battery SOC** sensor (%)
-- An **`input_boolean`** you create yourself as the master enable toggle
-  (e.g. `input_boolean.solar_charging_enabled`)
-- A second **`input_boolean`** for the below-minimum tracker shared
-  between the Controller and the Grace Stop blueprint
-  (e.g. `input_boolean.solar_charging_below_min`)
-- Two **`input_datetime`** helpers (time-only) for the charging window,
-  shared between the Controller and the Plugged-In Notify blueprint
-  (e.g. `input_datetime.solar_window_start`,
-  `input_datetime.solar_window_end`). Expose these on your dashboard to
-  change the window from the EV view — both blueprints read the same
-  helpers, so notifications and control stay in sync.
+- An **`input_boolean`** you create yourself as the master enable
+  toggle (e.g. `input_boolean.solar_charging_enabled`)
+- A second **`input_boolean`** for the below-minimum tracker
+  (e.g. `input_boolean.solar_charging_below_min`). The controller
+  toggles this internally; you do not need to interact with it.
+- Two **`input_datetime`** helpers (time only) for the charging
+  window (e.g. `input_datetime.solar_window_start`,
+  `input_datetime.solar_window_end`). Expose these on your dashboard
+  to change the window without editing the automation.
 
 Optional:
 
-- A **Tesla charge limit** `number` entity (blueprint falls back to the
-  configured SOC cap if absent)
+- A **Tesla charge limit** `number` entity (controller falls back to
+  the configured SOC cap if absent)
 - A **wake-up** `button` for the Tesla integration
-- An **`input_datetime`** (date + time) shared between the Import Guard
-  and the Controller to enable fast recovery after brief import spikes
-  (e.g. `input_datetime.solar_charging_last_guard_trim`)
+- An **`input_datetime`** (date + time) used to stamp the last
+  import-spike trim, enabling fast recovery after brief import
+  spikes (e.g. `input_datetime.solar_charging_last_guard_trim`)
 - A **notify service** (e.g. `notify.mobile_app_phone`) for session
-  notifications (SOC reached, window closed, solar-exhaustion stop)
+  and lifecycle notifications
 - **Solcast PV Forecast** daily-total sensors for the forecast boost.
-  Pick today, tomorrow, and as many of `day_3`–`day_7` as you want
-  (the lookahead input chooses how far ahead to inspect):
+  Pick today, tomorrow, and as many of `day_3` to `day_7` as you
+  want (the lookahead input chooses how far ahead to inspect):
   `sensor.solcast_pv_forecast_forecast_today`,
   `sensor.solcast_pv_forecast_forecast_tomorrow`,
   `sensor.solcast_pv_forecast_forecast_day_3`,
@@ -90,7 +97,7 @@ Optional:
 
 ## Forecast boost (optional)
 
-The Controller has two SOC caps:
+The controller has two SOC caps:
 
 | Input | Role |
 |---|---|
@@ -99,32 +106,34 @@ The Controller has two SOC caps:
 
 The boost is **active for the day** when *all* of the following hold:
 
-1. `solcast_today_kwh` ≥ "sunny today" threshold (e.g. 25 kWh).
-2. Every Solcast forecast for the next `boost_lookahead_days` (1–6) is
-   ≤ "bad day" threshold (e.g. 12 kWh) — and every one of those
-   sensors has a valid reading.
-3. Boost SOC cap > Preferred SOC cap.
+1. `solcast_today_kwh` is at or above the "sunny today" threshold
+   (e.g. 25 kWh).
+2. Every Solcast forecast for the next `boost_lookahead_days` (1 to
+   6) is at or below the "bad day" threshold (e.g. 12 kWh), and
+   every one of those sensors has a valid reading.
+3. Boost SOC cap is greater than Preferred SOC cap.
 
 If any upcoming forecast sensor is missing or unavailable, the boost
-is suppressed (fail-safe — better to under-charge than to assume a
+is suppressed (fail-safe: better to under-charge than to assume a
 sunny week ahead based on partial data).
 
 Leave all `solcast_*_kwh` inputs blank to disable the feature
-entirely; the Controller then behaves exactly as before with
-`max_soc` as the only cap.
+entirely; the controller then behaves with `max_soc` as the only
+cap.
 
 > **Note on Solcast naming:** the upcoming-day sensors are
-> `forecast_tomorrow`, `forecast_day_3`, `forecast_day_4`, … so
-> `day_3` is **two** days from today, `day_7` is **six** days from
-> today. The lookahead consumes them in order, so to look 3 days
-> ahead set lookahead = 3 and provide tomorrow + day_3 + day_4.
+> `forecast_tomorrow`, `forecast_day_3`, `forecast_day_4`, ... so
+> `day_3` is **two** days from today and `day_7` is **six** days
+> from today. The lookahead consumes them in order, stopping at the
+> first gap, so to look 3 days ahead set lookahead = 3 and provide
+> tomorrow + day_3 + day_4.
 
 ## Charging window (dashboard control)
 
-The Controller and Plugged-In Notify blueprints both take the window
-start/end as `input_datetime` entity inputs (time-only helpers). Create
-the helpers once, point both blueprints at them, and add them to a
-dashboard card to change the window without editing automations:
+The controller takes the window start/end as `input_datetime` entity
+inputs (time-only helpers). Create the helpers once, point the
+controller at them, and add them to a dashboard card to change the
+window without editing the automation:
 
 ```yaml
 type: entities
@@ -135,13 +144,13 @@ entities:
   - input_datetime.solar_window_end
 ```
 
-The Controller re-evaluates every minute, so changes take effect within
-~60 s. Cross-midnight windows are not supported (string comparison on
-`HH:MM:SS`).
+The controller re-evaluates every minute, so changes take effect
+within ~60 s. Cross-midnight windows are not supported (string
+comparison on `HH:MM:SS`).
 
 ## Electrical setup
 
-Set these inputs on the Controller to match your install:
+Set these inputs on the controller to match your install:
 
 | Install | `line_voltage` | `phase_count` |
 |---|---|---|
@@ -151,17 +160,39 @@ Set these inputs on the Controller to match your install:
 | US split-phase (240 V) | 240 | 1 |
 | US 1-phase (120 V) | 120 | 1 |
 
-The grid export sensor must report **total** grid power across all phases
-(standard for whole-house meters like Shelly EM, Enphase, Powerwall). If
-your sensor reports per-phase watts instead, set `phase_count` to 1.
+The grid export sensor must report **total** grid power across all
+phases (standard for whole-house meters like Shelly EM, Enphase,
+Powerwall). If your sensor reports per-phase watts instead, set
+`phase_count` to 1.
 
-Sign convention: the export sensor is **≤ 0 when exporting** (positive
-when importing), and the import sensor is **≥ 0 when importing**. They
-are combined additively inside the controller so two-counter meters
-(Enphase-style: separate unidirectional import and export registers)
-work correctly. If your meter only exposes a single signed net sensor,
-point both controller inputs at that same entity — the math still works
-because `net + 0 == net`.
+Sign convention: the export sensor is **at or below 0 when
+exporting** (positive when importing), and the import sensor is **at
+or above 0 when importing**. They are combined additively inside
+the controller so two-counter meters (Enphase-style: separate
+unidirectional import and export registers) work correctly. If your
+meter only exposes a single signed net sensor, point both controller
+inputs at that same entity. The math still works because
+`net + 0 == net`.
+
+## Runtime model
+
+The consolidated controller is a single `mode: parallel` automation.
+Each trigger carries an `id` and the action routes to a matching
+branch:
+
+| Trigger id | Source | Branch behaviour |
+|---|---|---|
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. |
+| `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session and notify. |
+| `ha_start_reconcile` | HA start | Clear a stale below-minimum flag if no session is running. |
+| `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. |
+| `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
+| `enabled` | Enable toggle goes ON while plugged in | Notify. |
+| `disabled` | Enable toggle goes OFF mid-session | Notify. |
+
+Parallel mode lets a fast import trim run while a slow ramp is still
+in its stability delay. The trim is purely a ramp-down; the controller
+remains the single source of truth for stop decisions.
 
 ## License
 
