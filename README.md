@@ -1,7 +1,11 @@
 # Solar-Aware Tesla Charging (Home Assistant Blueprint)
 
-Ramp-first solar charging control for a Tesla Wall Connector using any
-grid-power sensor pair (Enphase, Shelly EM, Powerwall, etc.). One
+Solar-aware charge control for a Tesla on a Wall Connector, via Home
+Assistant. Modulates the car's charge current in 1 A steps through
+the Tesla integration to track available solar export, instead of
+stop/starting the session. Pairs with any grid-monitoring setup that
+exposes import and export power as W sensors (Enphase, Shelly EM,
+Powerwall, Emporia, generic CT clamps via ESPHome, etc.). One
 blueprint, one automation, every behaviour:
 
 - Ramps current between 1 A and charger max. Never stop/starts unnecessarily.
@@ -10,9 +14,10 @@ blueprint, one automation, every behaviour:
   timer aborts automatically.
 - Instant grid-import guard: trims current the moment any appliance
   causes net import.
-- Fast recovery after a brief import spike. The guard stamps an
-  `input_datetime` the same automation reads to skip its stability
-  delay so a kettle pulse doesn't pin charging low.
+- Fast recovery after a brief import spike. After the guard trims,
+  the main ramp loop skips its stability delay for a few minutes,
+  so a kettle pulse doesn't pin charging low for the rest of the
+  session.
 - **Fast ramp-up** (configurable): when available export jumps well
   ahead of the current setpoint (default 3 A of headroom), jump
   directly to target in one tick instead of the conservative +1 A
@@ -24,12 +29,14 @@ blueprint, one automation, every behaviour:
 - SOC-aware: stops at the lower of the configured cap and the Tesla
   car-side charge limit. The car-side limit is read but never
   written, so your Tesla app setting is left untouched.
-- Lifecycle notifications: plug-in (whether solar charging is armed
-  or not), enable while plugged in, disable mid-session.
+- Lifecycle notifications: car plugged in (whether the master toggle
+  is on or off), master toggle flipped on while plugged in, master
+  toggle flipped off mid-session.
 - Session-end notifications for SOC cap, optional hard window-end
   stop, and solar-exhaustion stop.
-- Wakes an ambiguous-status Tesla on resume so a mid-session sleep
-  doesn't block restart.
+- Wakes the Tesla automatically when its status is asleep or unknown
+  at the moment the controller tries to restart charging, so a
+  mid-session car sleep doesn't block the resume.
 - Optional **Solcast forecast boost**: raises the SOC cap on a sunny
   day when the next 1 to 6 days are forecast to be poor, so you
   stash extra charge before bad weather. Disabled by default;
@@ -41,14 +48,16 @@ blueprint, one automation, every behaviour:
   are restored automatically when the SOC cap is reached, with a
   window-end safety net.
 - Optional **session start lock**: dedupes "Solar Charging Started"
-  notifications when the start branch is re-entered during the 15 s
+  notifications when the start logic re-enters during the 15 s
   car-wake delay. Auto-clears on contactor open, HA restart, or
   unplug.
-- Optional **Tesla unreachable guard**: tick branch skips its main
-  evaluation when Tesla Fleet API entities are unavailable, so a
-  Fleet API hiccup doesn't produce a noisy failure log.
+- Optional **Tesla-unreachable guard**: when Tesla Fleet API
+  entities are unavailable, the controller skips its per-minute
+  evaluation rather than logging service-call errors. Resumes
+  automatically as soon as the API recovers.
 - Robust against missing or unavailable sensors throughout. Each
-  branch fails closed.
+  branch checks its inputs first and skips silently rather than
+  running on bad data.
 
 ## Blueprints
 
@@ -106,8 +115,8 @@ Optional:
   and lifecycle notifications
 - A third **`input_boolean`** as a session start lock (e.g.
   `input_boolean.solar_charging_session_active`). Dedupes the
-  "Solar Charging Started" notification when the start branch is
-  re-entered during the 15 s wake delay. See [Session start lock](#session-start-lock-optional).
+  "Solar Charging Started" notification when the start logic
+  re-enters during the 15 s wake delay. See [Session start lock](#session-start-lock-optional).
 - One or more **`input_boolean`** entities that gate other power-
   hungry automations (AC, pool pump, etc.) you want the controller
   to pause while the Tesla SOC is low. See [Load prioritisation](#load-prioritisation-optional).
@@ -129,7 +138,8 @@ inside this automation**. The controller reads the car's own
 charge-limit number (the one you set in the Tesla app) but never
 writes to it. Nothing about your Tesla configuration changes.
 
-The effective stop point during a controlled solar session is:
+The effective stop point while this automation is in control of the
+session is:
 
 ```
 effective_limit = min(local_cap, tesla_app_limit)
@@ -137,9 +147,9 @@ effective_limit = min(local_cap, tesla_app_limit)
 
 So if your Tesla app limit is 80 % and the Preferred SOC cap is
 60 %, home solar charging stops at 60 %. A Supercharger session, a
-non-controlled Wall Connector session, or any charging that happens
-while the master toggle is off, will still charge up to the 80 %
-car-side limit.
+Wall Connector session started while the master toggle is OFF, or
+any other charging not driven by this automation, will still charge
+up to the 80 % car-side limit.
 
 Practical consequence for the boost: to actually fill above the
 Preferred cap, the car-side limit must be at or above the Boost
@@ -196,8 +206,8 @@ entities:
 ```
 
 The controller re-evaluates every minute, so changes take effect
-within ~60 s. Cross-midnight windows are not supported (string
-comparison on `HH:MM:SS`).
+within ~60 s. Cross-midnight windows are not supported: the end
+time must be later in the same day than the start time.
 
 ## Electrical setup
 
@@ -254,20 +264,23 @@ Behaviour:
 - The window-end restore runs regardless of the master enable
   toggle so loads never get stuck off.
 - The controller only writes to a boolean when its state would
-  actually change. The logbook stays clean even though the tick
-  branch evaluates every minute.
-- The restore is unconditional: if you have your own reason to keep
-  one of those automations paused, gate it from a different switch
-  or pick a separate `input_boolean`.
+  actually change, so the logbook stays clean even though the
+  controller re-evaluates every minute.
+- The restore turns each boolean back ON unconditionally; the
+  controller doesn't track *why* it was off. If you have your own
+  reason to keep one of those automations paused, gate it from a
+  different switch so the controller's restore can't undo your
+  intent.
 
 Leave the input empty to disable the feature entirely.
 
 ## Session start lock (optional)
 
-Under `mode: parallel`, the start branch can be re-entered while
-the previous run is still inside its 15 s car-wake delay, producing
-a duplicate "Solar Charging Started" notification. The session
-start lock prevents this.
+The controller runs in parallel mode so a fast import trim can
+interrupt a slow ramp. As a side-effect, the start logic can fire
+a second time while the previous run is still in its 15 s car-wake
+delay, producing a duplicate "Solar Charging Started"
+notification. The session start lock prevents this.
 
 Wire-up:
 
@@ -280,7 +293,7 @@ Wire-up:
    (when no session is live), or when the car is unplugged.
 
 Leave the input empty to skip the lock; duplicate "Started"
-notifications are then possible if the start branch is re-entered
+notifications are then possible if the start logic re-enters
 during the wake delay.
 
 ## Tuning for cloudy / fluctuating solar
@@ -294,7 +307,7 @@ chatter and slightly higher chance of brief grid imports:
 |---|---|---|---|
 | `export_threshold_amps` | 1 | 0 | Removes the constant ~230 W (1-ph) / 690 W (3-ph) export buffer. |
 | `stability_delay_seconds` | 60 | 15 to 30 | Time the controller waits between ramp-up steps. |
-| `post_trim_fast_recovery_seconds` | 180 | 300 to 600 | After an import-spike trim, the stability delay is skipped for this long. Bigger window = controller stays in fast mode through a cloud event. |
+| `post_trim_fast_recovery_seconds` | 180 | 300 to 600 | After an import-spike trim, the stability delay is skipped for this long, so the controller keeps tracking solar without the per-step pause through a cloud event. |
 | `import_threshold_w` | 50 | 25 to 30 | Noise floor for the import-spike trim. Lower = reacts to smaller imports. |
 | `fast_ramp_headroom_amps` | 3 | 2 | When available export is at least this many amps above the current setpoint, jump directly to target instead of the +1 A per minute cap. |
 
@@ -305,9 +318,10 @@ sub-amp resolution.
 
 ## Runtime model
 
-The consolidated controller is a single `mode: parallel` automation.
-Each trigger carries an `id` and the action routes to a matching
-branch:
+The controller is one automation with several triggers. Each
+trigger carries an `id` and the action routes to a matching
+branch. Triggers run in parallel so a fast import trim can
+execute alongside a slow ramp.
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
@@ -321,10 +335,11 @@ branch:
 | `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
 | `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session start lock so a future start can fire. |
 
-Parallel mode lets a fast import trim run while a slow ramp is still
-in its stability delay. The trim is purely a ramp-down; the controller
-remains the single source of truth for stop decisions.
+The import trim only ever ramps current down; only the per-minute
+`tick` branch can stop or restart a session, so there's no risk of
+the two branches fighting each other.
 
 ## License
 
-MIT
+MIT. Copyright (c) 2024-2026 Andre Sambade. See [LICENSE](LICENSE) for
+the full text.
