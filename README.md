@@ -98,6 +98,30 @@ Optional:
   `sensor.solcast_pv_forecast_forecast_day_6`,
   `sensor.solcast_pv_forecast_forecast_day_7`
 
+## SOC caps are local, not pushed to the car
+
+The Preferred SOC cap and Boost SOC cap are **local stop thresholds
+inside this automation**. The controller reads the car's own
+charge-limit number (the one you set in the Tesla app) but never
+writes to it. Nothing about your Tesla configuration changes.
+
+The effective stop point during a controlled solar session is:
+
+```
+effective_limit = min(local_cap, tesla_app_limit)
+```
+
+So if your Tesla app limit is 80 % and the Preferred SOC cap is
+60 %, home solar charging stops at 60 %. A Supercharger session, a
+non-controlled Wall Connector session, or any charging that happens
+while the master toggle is off, will still charge up to the 80 %
+car-side limit.
+
+Practical consequence for the boost: to actually fill above the
+Preferred cap, the car-side limit must be at or above the Boost
+cap. Example: Tesla app 90 %, Preferred 60 %, Boost 80 % means
+normal solar stops at 60 % and a boost day stops at 80 %.
+
 ## Forecast boost (optional)
 
 The controller has two SOC caps:

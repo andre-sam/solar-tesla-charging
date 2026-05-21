@@ -126,8 +126,12 @@ blueprint:
 
     charge_limit_number:
       name: Tesla charge limit control (optional)
-      description: number.* entity for the Tesla SOC charge limit. Leave
-        empty to use only the "Max SOC" value below.
+      description: >
+        number.* entity for the Tesla's own car-side SOC limit
+        (the one you set in the Tesla app). The controller READS it
+        and treats it as a hard ceiling. It never WRITES to it, so
+        your app setting is left untouched. Leave empty to use only
+        the local SOC caps below.
       default: ""
       selector:
         entity:
@@ -237,10 +241,16 @@ blueprint:
     max_soc:
       name: Preferred SOC cap (%)
       description: >
-        Normal target SOC for solar charging. The Controller stops the
-        session at this SOC unless the optional Solcast forecast boost
-        is configured AND triggered (see below), in which case the
-        boost cap is used instead.
+        Local stop threshold for solar charging. The controller stops
+        the session when SOC reaches this value; it does NOT write
+        anything to the Tesla. The car-side limit (set in the Tesla
+        app, exposed as the optional charge-limit number above) is
+        honoured as a hard ceiling, so the effective stop point is
+        whichever is lower. Example: car-side limit 80 %, Preferred
+        cap 60 % means home solar charging stops at 60 % while a
+        Supercharger session still goes to 80 %. Overridden by the
+        Boost SOC cap below when the Solcast forecast boost is
+        active.
       default: 90
       selector:
         number:
@@ -252,10 +262,14 @@ blueprint:
     boost_soc:
       name: Boost SOC cap (%)
       description: >
-        Raised SOC cap used on a "last sunny day before bad weather"
-        according to the Solcast forecast inputs below. Should be at
-        or above the Preferred SOC cap. Has no effect unless at least
-        the "today" and "+1 day" Solcast sensors are provided.
+        Raised local stop threshold used on a "last sunny day before
+        bad weather" according to the Solcast forecast inputs below.
+        Same semantics as the Preferred SOC cap: local-only, not
+        pushed to the car, and capped by the car-side limit. To
+        actually fill above the Preferred cap, the car-side limit
+        must be at or above this value. Should be at or above the
+        Preferred SOC cap. Has no effect unless at least the "today"
+        and "+1 day" Solcast sensors are provided.
       default: 90
       selector:
         number:
