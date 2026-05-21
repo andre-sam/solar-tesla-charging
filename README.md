@@ -217,16 +217,24 @@ Behaviour:
 - While the charging window is open AND the Tesla SOC is below the
   threshold, the controller turns OFF any of the listed booleans
   that are currently ON.
-- At the window end time, the controller turns ON any of those
-  booleans that are currently OFF. The restore runs regardless of
-  the master enable toggle so loads never get stuck off.
+- The controller turns ON any of those booleans that are currently
+  OFF in two situations:
+  1. As soon as the Tesla reaches the effective SOC cap (the lower
+     of the local Preferred / Boost cap and the Tesla app limit).
+     Restoring at this point means the loads come back online as
+     soon as the car no longer needs the priority, not at the end
+     of the window.
+  2. At the window end time, as a safety net so loads can't get
+     stuck off if the SOC cap is never reached (e.g. session ends
+     for other reasons, or the car was unplugged).
+- The window-end restore runs regardless of the master enable
+  toggle so loads never get stuck off.
 - The controller only writes to a boolean when its state would
   actually change. The logbook stays clean even though the tick
   branch evaluates every minute.
-- The restore is unconditional at window close: if you have your
-  own reason to keep one of those automations paused beyond the
-  window, gate it from a different switch or pick a separate
-  `input_boolean`.
+- The restore is unconditional: if you have your own reason to keep
+  one of those automations paused, gate it from a different switch
+  or pick a separate `input_boolean`.
 
 Leave the input empty to disable the feature entirely.
 
@@ -238,7 +246,7 @@ branch:
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
-| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Also pauses prioritize-loads when SOC is low during the window. |
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. |
 | `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session and notify. |
 | `ha_start_reconcile` | HA start | Clear a stale below-minimum flag if no session is running. |
 | `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. |
