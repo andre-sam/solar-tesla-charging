@@ -70,6 +70,12 @@ changes within seconds rather than at the next minute boundary.
   SOC is low so the car gets first claim on solar export. Loads
   are restored automatically when the SOC cap is reached, with a
   window-end safety net.
+- Optional **deferrable load awareness**: point the controller at
+  power sensors for solar diverters (e.g. a myenergi eddi) and
+  their consumption is treated as available surplus. The Tesla
+  ramps up to reclaim it, the diverter backs off naturally, and
+  brief ramp-up overshoots are not punished by the import-spike
+  trim.
 - Optional **session start lock**: dedupes "Solar Charging Started"
   notifications when the start logic re-enters during the 15 s
   car-wake delay. Auto-clears on contactor open, HA restart, or
@@ -143,6 +149,9 @@ Optional:
 - One or more **`input_boolean`** entities that gate other power-
   hungry automations (AC, pool pump, etc.) you want the controller
   to pause while the Tesla SOC is low. See [Load prioritisation](#load-prioritisation-optional).
+- One or more **power sensors** (W or kW) for deferrable loads
+  (e.g. `sensor.myenergi_eddi_internal_load_ct1`) that you'd
+  rather have the Tesla outbid. See [Deferrable load awareness](#deferrable-load-awareness-optional).
 - **Solcast PV Forecast** daily-total sensors for the forecast boost.
   Pick today, tomorrow, and as many of `day_3` to `day_7` as you
   want (the lookahead input chooses how far ahead to inspect):
@@ -297,6 +306,58 @@ Behaviour:
 
 Leave the input empty to disable the feature entirely.
 
+## Deferrable load awareness (optional)
+
+If you have a solar diverter (myenergi eddi, Solic 200, custom
+ESPHome script that PWMs an immersion heater, etc.) the controller
+can be made aware of it so the Tesla doesn't "see" all your surplus
+as already taken.
+
+The diverter modulates to soak up whatever surplus is left after the
+rest of the house. From the Tesla controller's perspective, that
+makes the grid look perfectly balanced and there is nothing to
+claim. Wire a power sensor for the diverter's load into the
+controller's **Deferrable load power sensors** input and that
+consumption is added to the available export budget. The Tesla
+ramps up, the export shrinks, the diverter sees less surplus and
+backs off on its own. Net result: the Tesla gets first claim on PV,
+the diverter still gets whatever the Tesla can't use, no on/off
+handshake required.
+
+How it's computed:
+
+- Only the **solar-fed portion** of the deferrable load is added
+  back: `reclaimable = max(0, deferrable_load_w - grid_import_w)`.
+  This caps headroom at the load that is actually being supplied
+  by solar, so the controller never claims grid-imported power as
+  surplus.
+- The import-spike trim treats import that is still covered by the
+  deferrable load as expected ramp-up overshoot and skips the
+  trim. If the load has fully backed off and the import persists,
+  the trim runs as normal on whatever import is left over.
+- Multiple sensors are summed. Units are honoured per sensor (W or
+  kW). Unavailable / unknown sensors are skipped silently.
+- Negative readings are ignored (the input is meant for
+  consumption-only sensors).
+
+When NOT to use this:
+
+- A non-deferrable load that just happens to be on (kettle, oven).
+  Those won't back off when you crowd them out, you'll just import.
+  Only point this input at loads you trust to yield on their own.
+- A diverter whose output is already netted out of your grid export
+  sensor by the meter (some installs have the diverter wired
+  upstream of the CT). In that case the diverter is already invisible
+  to the controller in the way you want, and adding the sensor here
+  would double-count.
+
+If your diverter has a very slow response (more than ~10 s to back
+off), expect short import bursts during Tesla ramp-up. The
+import-spike trim absorbs the worst of it, but raising
+`import_safety_margin_amps` by 1 can help.
+
+Leave the input empty to disable the feature entirely.
+
 ## Session start lock (optional)
 
 The controller runs in parallel mode so a fast import trim can
@@ -337,7 +398,10 @@ chatter and slightly higher chance of brief grid imports:
 If you also have a fine-grained PV diverter (myenergi Eddi or
 similar) on the same circuit, leave it to handle the residual
 below ~700 W. Tesla can't compete with phase-angle PWM control at
-sub-amp resolution.
+sub-amp resolution. You can also point the controller's
+**Deferrable load power sensors** input at the diverter's CT so
+the Tesla actively reclaims the diverter's bigger draws; see
+[Deferrable load awareness](#deferrable-load-awareness-optional).
 
 ## Runtime model
 
@@ -348,10 +412,10 @@ execute alongside a slow ramp.
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
-| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Skipped when Tesla Fleet API entities are unavailable. |
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Adds any configured deferrable load consumption (capped at the solar-fed portion) to the available export budget. Skipped when Tesla Fleet API entities are unavailable. |
 | `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session and notify. |
 | `ha_start_reconcile` | HA start | Clear stale stateful flags (below-minimum tracker, session start lock) if no session is running. |
-| `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. |
+| `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. Import covered by configured deferrable loads is treated as expected ramp-up overshoot and skipped. |
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
 | `disabled` | Enable toggle goes OFF mid-session | Notify. |

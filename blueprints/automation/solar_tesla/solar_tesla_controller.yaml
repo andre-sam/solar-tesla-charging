@@ -30,6 +30,8 @@ blueprint:
       - input_boolean as a session start lock to dedupe
         "Solar Charging Started" notifications
       - input_boolean entities for load prioritisation
+      - power sensors for deferrable loads (e.g. a myenergi eddi
+        diverter) so the Tesla can claim that solar power first
       - Solcast PV Forecast sensors for the forecast boost
       - a notify service for session and lifecycle notifications
 
@@ -571,6 +573,29 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
+    deferrable_load_sensors:
+      name: Deferrable load power sensors (optional)
+      description: >
+        Optional list of POWER sensors (W or kW) for loads that
+        automatically yield to other consumers, such as a myenergi
+        eddi solar diverter (e.g. sensor.myenergi_eddi_internal_load_ct1)
+        or any "surplus soaking" appliance you would rather have the
+        Tesla outbid. Their combined consumption is added to the
+        available export budget (capped at the solar-fed portion, so
+        we never double-count grid-imported power), letting the Tesla
+        ramp up; the diverter then backs off naturally as export
+        falls. The import-spike trim ignores transient import that is
+        still covered by the configured deferrable loads, so brief
+        ramp-up overshoots don't trigger an immediate trim. Sensors
+        must report POSITIVE values when consuming. Leave empty to
+        disable this feature.
+      default: []
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+          multiple: true
+
     session_lock:
       name: Session start lock (optional)
       description: >
@@ -636,6 +661,7 @@ variables:
   window_end: !input window_end
   prioritize_load_booleans: !input prioritize_load_booleans
   prioritize_below_soc: !input prioritize_below_soc
+  deferrable_load_sensors: !input deferrable_load_sensors
   session_lock: !input session_lock
 
 trigger:
@@ -824,6 +850,25 @@ action:
         sequence:
           - variables:
               import_w: "{{ states(grid_import_power) | float(0) }}"
+              # Deferrable loads (solar diverters etc.) that back off
+              # automatically as the Tesla draws more. While they're
+              # still consuming above the spike, the import is
+              # "borrowed" PV and the load will yield within seconds;
+              # no Tesla trim is needed.
+              deferrable_load_w: >
+                {% set ns = namespace(total=0.0) %}
+                {% for e in deferrable_load_sensors %}
+                  {% set raw = states(e) | float(none) %}
+                  {% if raw is not none and raw > 0 %}
+                    {% set unit = state_attr(e, 'unit_of_measurement')
+                                  | default('W', true) | lower %}
+                    {% set w = (raw * 1000) if 'kw' in unit else raw %}
+                    {% set ns.total = ns.total + w %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.total }}
+              effective_import_w: >
+                {{ [import_w - (deferrable_load_w | float(0)), 0] | max }}
               current_set_amps: "{{ states(charge_current_number) | float(0) }}"
               min_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
               # 230 V * 3 phases = 690 W per 1 A of charge current.
@@ -831,28 +876,35 @@ action:
               # Ceiling division covers the fractional amp; the
               # safety margin adds any further cushion (default 0).
               reduce_by: >
-                {{ ((import_w / watts_per_amp) | round(0, 'ceil') | int)
+                {{ ((effective_import_w / watts_per_amp) | round(0, 'ceil') | int)
                    + (import_safety_margin_amps | int) }}
               reduced_amps: >
                 {{ [(current_set_amps | int) - reduce_by,
                     (min_amps | int)] | max }}
-          # Stamp the trim timestamp FIRST so under heavy sensor
-          # chatter the controller still sees a recent trim marker
-          # even if number.set_value below is preempted.
+          # Skip the trim entirely if the spike is fully covered by
+          # deferrable loads that are expected to back off.
           - if:
               - condition: template
-                value_template: "{{ last_guard_trim | length > 0 }}"
+                value_template: >
+                  {{ effective_import_w > (import_threshold_w | float(0)) }}
             then:
-              - service: input_datetime.set_datetime
+              # Stamp the trim timestamp FIRST so under heavy sensor
+              # chatter the controller still sees a recent trim marker
+              # even if number.set_value below is preempted.
+              - if:
+                  - condition: template
+                    value_template: "{{ last_guard_trim | length > 0 }}"
+                then:
+                  - service: input_datetime.set_datetime
+                    target:
+                      entity_id: !input last_guard_trim
+                    data:
+                      datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+              - service: number.set_value
                 target:
-                  entity_id: !input last_guard_trim
+                  entity_id: !input charge_current_number
                 data:
-                  datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-          - service: number.set_value
-            target:
-              entity_id: !input charge_current_number
-            data:
-              value: "{{ reduced_amps }}"
+                  value: "{{ reduced_amps }}"
 
       # ─────────────────────────────────────────────────────────────
       # PLUGGED IN: notify based on whether solar charging is armed.
@@ -1005,7 +1057,29 @@ action:
               grid_export_w: >
                 {{ -((states(grid_import_power) | float(0))
                      + (states(grid_export_power_negative) | float(0))) }}
-              effective_export_w: "{{ grid_export_w + wall_power_w }}"
+              # Deferrable loads (solar diverters etc.) that back off
+              # as the Tesla draws more. Sum positive readings, honour
+              # W vs kW per sensor, skip any unavailable entity.
+              deferrable_load_w: >
+                {% set ns = namespace(total=0.0) %}
+                {% for e in deferrable_load_sensors %}
+                  {% set raw = states(e) | float(none) %}
+                  {% if raw is not none and raw > 0 %}
+                    {% set unit = state_attr(e, 'unit_of_measurement')
+                                  | default('W', true) | lower %}
+                    {% set w = (raw * 1000) if 'kw' in unit else raw %}
+                    {% set ns.total = ns.total + w %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.total }}
+              # Only the solar-fed portion of the deferrable load is
+              # reclaimable; anything currently grid-fed wouldn't free
+              # up if the load backed off.
+              import_now_w: "{{ [states(grid_import_power) | float(0), 0] | max }}"
+              reclaimable_deferrable_w: >
+                {{ [(deferrable_load_w | float(0)) - import_now_w, 0] | max }}
+              effective_export_w: >
+                {{ grid_export_w + wall_power_w + reclaimable_deferrable_w }}
               effective_export_a: >
                 {{ (effective_export_w / line_voltage)
                    if effective_export_w > 0 else 0 }}
