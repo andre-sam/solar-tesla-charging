@@ -550,9 +550,10 @@ blueprint:
         window, the controller turns these OFF so the Tesla gets
         priority on solar export. They are turned back ON as soon
         as the Tesla reaches the effective SOC cap (Preferred or
-        Boost, capped by the car-side limit), and also at window
-        close as a safety net if the cap is never reached. Leave
-        empty to disable this feature.
+        Boost, capped by the car-side limit), when the vehicle is
+        unplugged from the charger, and also at window close as a
+        safety net if neither has happened. Leave empty to disable
+        this feature.
       default: []
       selector:
         entity:
@@ -736,6 +737,14 @@ trigger:
     entity_id: !input enable_toggle
     to: "off"
     id: disabled
+
+  # Vehicle unplugged: restore any prioritize-loads the controller
+  # disabled during the session, so loads like AC don't stay off
+  # after the car leaves the charger mid-window.
+  - platform: state
+    entity_id: !input vehicle_connected
+    to: "off"
+    id: unplugged
 
   # Window close: restore any prioritize-loads the controller
   # disabled during the session.
@@ -961,6 +970,36 @@ action:
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'window_close' }}"
+          - condition: template
+            value_template: "{{ prioritize_load_booleans | length > 0 }}"
+        sequence:
+          - variables:
+              prioritize_off_loads: >
+                {% set ns = namespace(items=[]) %}
+                {% for e in prioritize_load_booleans %}
+                  {% if states(e) == 'off' %}
+                    {% set ns.items = ns.items + [e] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+          - if:
+              - condition: template
+                value_template: "{{ prioritize_off_loads | length > 0 }}"
+            then:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: "{{ prioritize_off_loads }}"
+
+      # ─────────────────────────────────────────────────────────────
+      # UNPLUGGED: vehicle disconnected from the charger. Restore any
+      # prioritize-loads (e.g. AC) the controller paused during the
+      # session so they don't stay off until window close. Runs
+      # regardless of enable_toggle so loads recover even if the
+      # controller was disabled while the car was still plugged in.
+      # ─────────────────────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'unplugged' }}"
           - condition: template
             value_template: "{{ prioritize_load_booleans | length > 0 }}"
         sequence:

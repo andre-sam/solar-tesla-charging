@@ -68,8 +68,8 @@ changes within seconds rather than at the next minute boundary.
 - Optional **load prioritisation**: temporarily pauses other
   power-hungry automations (AC, pool pump, etc.) while the Tesla
   SOC is low so the car gets first claim on solar export. Loads
-  are restored automatically when the SOC cap is reached, with a
-  window-end safety net.
+  are restored automatically when the SOC cap is reached or when
+  the vehicle is unplugged, with a window-end safety net.
 - Optional **deferrable load awareness**: point the controller at
   power sensors for solar diverters (e.g. a myenergi eddi) and
   their consumption is treated as available surplus. The Tesla
@@ -284,17 +284,20 @@ Behaviour:
   threshold, the controller turns OFF any of the listed booleans
   that are currently ON.
 - The controller turns ON any of those booleans that are currently
-  OFF in two situations:
+  OFF in three situations:
   1. As soon as the Tesla reaches the effective SOC cap (the lower
      of the local Preferred / Boost cap and the Tesla app limit).
      Restoring at this point means the loads come back online as
      soon as the car no longer needs the priority, not at the end
      of the window.
-  2. At the window end time, as a safety net so loads can't get
-     stuck off if the SOC cap is never reached (e.g. session ends
-     for other reasons, or the car was unplugged).
-- The window-end restore runs regardless of the master enable
-  toggle so loads never get stuck off.
+  2. As soon as the vehicle is unplugged from the wall connector,
+     so loads like AC come back on immediately when the car leaves
+     mid-window rather than waiting for the window to end.
+  3. At the window end time, as a safety net so loads can't get
+     stuck off if neither of the above has happened (e.g. session
+     ends for other reasons while the car stays plugged in).
+- The unplug and window-end restores both run regardless of the
+  master enable toggle so loads never get stuck off.
 - The controller only writes to a boolean when its state would
   actually change, so the logbook stays clean even though the
   controller re-evaluates every minute.
@@ -419,6 +422,7 @@ execute alongside a slow ramp.
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
 | `disabled` | Enable toggle goes OFF mid-session | Notify. |
+| `unplugged` | Vehicle-connected goes OFF | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. |
 | `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
 | `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session start lock so a future start can fire. |
 
