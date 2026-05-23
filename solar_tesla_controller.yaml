@@ -44,7 +44,11 @@ blueprint:
   input:
     enable_toggle:
       name: Master enable toggle
-      description: input_boolean you create to enable/disable solar charging.
+      description: >
+        Your on/off switch for the whole automation. Flip this off and
+        the controller stops doing anything; flip it on and it resumes
+        from wherever solar export currently sits. Use it from a
+        dashboard, from the app, or from a voice assistant.
       selector:
         entity:
           domain: input_boolean
@@ -52,11 +56,11 @@ blueprint:
     below_min_flag:
       name: Below-minimum tracker (input_boolean)
       description: >
-        input_boolean you create (e.g.
-        input_boolean.solar_charging_below_min). Turned ON while
-        export sits below the minimum charge current and OFF as soon
-        as export recovers or the session ends. If it stays ON for
-        the configured grace period, the session is stopped.
+        Internal bookkeeping helper. The controller turns this ON
+        while solar export is below the minimum charge current and OFF
+        as soon as export recovers. If it stays ON for the full grace
+        period (see Grace at minimum below), the session is stopped.
+        You create it once and don't interact with it.
       selector:
         entity:
           domain: input_boolean
@@ -64,10 +68,11 @@ blueprint:
     grid_export_power_negative:
       name: Grid export power sensor (W, negative when exporting)
       description: >
-        Signed net or export-only counter. Must be NEGATIVE when
-        exporting to the grid. Some meters expose this as a dedicated
-        export counter that reports below 0 W; others expose a signed
-        net grid sensor.
+        Power sensor that reads BELOW ZERO when your solar is
+        exporting to the grid. Used to know how much surplus is
+        available for the car. If your meter reports export the wrong
+        way (positive while exporting), wrap it in a template sensor
+        that multiplies by -1.
       selector:
         entity:
           domain: sensor
@@ -76,10 +81,11 @@ blueprint:
     grid_import_power:
       name: Grid import power sensor (W, positive when importing)
       description: >
-        Unidirectional import counter (>= 0 W). Combined additively
-        with the export sensor so two-counter meters (e.g. Enphase)
-        work correctly. If you only have one signed sensor, point
-        both inputs at it.
+        Power sensor that reads ABOVE ZERO when you're drawing from
+        the grid. Some meters (e.g. Enphase) report import and export
+        as two separate sensors — point this at the import one. If
+        your meter only exposes a single signed sensor, point BOTH
+        this and the export input above at it.
       selector:
         entity:
           domain: sensor
@@ -87,7 +93,12 @@ blueprint:
 
     wall_connector_power:
       name: Wall connector power sensor
-      description: Power currently drawn by the charger (W or kW).
+      description: >
+        Power the wall connector is currently delivering to the car.
+        The controller adds this back when working out how much
+        surplus solar is really available — without it, the car's own
+        draw would make the grid look balanced and the controller
+        would refuse to ramp up further.
       selector:
         entity:
           domain: sensor
@@ -96,29 +107,41 @@ blueprint:
     vehicle_connected:
       name: Vehicle connected binary sensor
       description: >
-        Wall connector binary sensor that is ON when a Tesla is
-        plugged into the charger.
+        Binary sensor from the wall connector that's ON when the
+        charge cable is plugged into the car. The controller only
+        considers charging when this is ON.
       selector:
         entity:
           domain: binary_sensor
 
     contactor_closed:
       name: Contactor closed binary sensor
-      description: On when the charger is actively delivering power.
+      description: >
+        Binary sensor that's ON when the wall connector is actively
+        passing current to the car. The controller treats this as the
+        definitive 'is a session running' signal — more reliable than
+        the Tesla integration's own state.
       selector:
         entity:
           domain: binary_sensor
 
     wall_connector_status:
       name: Wall connector status sensor
-      description: Text status ("Charging", "Connected", "Fault", ...).
+      description: >
+        Text status from the wall connector (typical values include
+        'Charging', 'Connected', 'Fault'). The controller refuses to
+        start when this reports a fault, and stops a running session
+        if a fault appears mid-charge.
       selector:
         entity:
           domain: sensor
 
     charge_current_number:
       name: Tesla charge current control (A)
-      description: number.* entity that sets the Tesla charge current.
+      description: >
+        The Tesla integration's amps slider. This is what the
+        controller writes to in order to modulate how hard the car
+        charges as solar comes and goes through the day.
       selector:
         entity:
           domain: number
@@ -126,8 +149,9 @@ blueprint:
     charge_switch:
       name: Tesla charge on/off switch
       description: >
-        switch.* entity from the Tesla integration that starts and
-        stops the car's charging session.
+        The Tesla integration's on/off switch for charging. The
+        controller turns this on to start a session and off to stop
+        one (e.g. at the SOC cap, or when solar runs out).
       selector:
         entity:
           domain: switch
@@ -135,9 +159,9 @@ blueprint:
     battery_soc:
       name: Tesla battery SOC sensor (%)
       description: >
-        Sensor reporting the Tesla's current state-of-charge as a
-        percentage (0-100). Used as the stop trigger when SOC
-        reaches the configured cap.
+        The car's current battery percentage. Drives the stop-at-cap
+        logic, the restart-if-drained logic, and the 'charged from X%
+        (+Y%)' summary in notifications.
       selector:
         entity:
           domain: sensor
@@ -145,11 +169,11 @@ blueprint:
     charge_limit_number:
       name: Tesla charge limit control (optional)
       description: >
-        number.* entity for the Tesla's own car-side SOC limit
-        (the one you set in the Tesla app). The controller READS it
-        and treats it as a hard ceiling. It never WRITES to it, so
-        your app setting is left untouched. Leave empty to use only
-        the local SOC caps below.
+        OPTIONAL. The car-side charge limit from the Tesla app
+        (READ-ONLY — the controller never changes your app setting).
+        When configured, the effective stop point becomes whichever is
+        lower: this car-side limit, or the local cap below. Leave
+        empty to use only the local cap.
       default: ""
       selector:
         entity:
@@ -158,10 +182,11 @@ blueprint:
     wake_button:
       name: Tesla wake-up button (optional)
       description: >
-        button.* pressed before starting or resuming charging. Leave
-        empty to skip. When provided, it is pressed whenever a
-        restart is attempted, including when the car's status is
-        asleep or unknown (which would otherwise block resume).
+        OPTIONAL but strongly recommended. A button entity from the
+        Tesla integration that wakes the car. The controller presses
+        it before any start or resume attempt so the car is awake by
+        the time the charge command arrives. Without it, restarts can
+        silently fail when the car has gone to sleep.
       default: ""
       selector:
         entity:
@@ -170,9 +195,10 @@ blueprint:
     line_voltage:
       name: Line voltage (V)
       description: >
-        Nominal line voltage of your supply. 230 V for AU / EU
-        (single- or three-phase), 240 V for UK and US 240 V
-        split-phase, 120 V for US 1-phase.
+        Your supply voltage. 230 V for Australia and most of Europe
+        (any number of phases), 240 V for UK or US split-phase, 120 V
+        for US single-phase. Used to convert watts of solar export
+        into amps the controller can send to the car.
       default: 230
       selector:
         number:
@@ -184,9 +210,12 @@ blueprint:
     phase_count:
       name: Number of phases
       description: >
-        1, 2 or 3. The grid export sensor must report TOTAL grid power
-        across all phases (typical for whole-house meters). If your
-        sensor reports per-phase watts, set this to 1.
+        Number of phases your wall connector is wired to (1, 2, or 3).
+        IMPORTANT: this only matters if your grid sensor reports TOTAL
+        household power across all phases (typical for whole-house
+        meters like Enphase, Powerwall, Shelly EM). If your sensor
+        reports just one phase, set this to 1 even on a 3-phase
+        install.
       default: 3
       selector:
         number:
@@ -197,11 +226,10 @@ blueprint:
     window_start:
       name: Charging window start (input_datetime)
       description: >
-        input_datetime helper (time only) defining when the charging
-        window opens. Create once in HA (Settings -> Devices &
-        services -> Helpers -> Date/time, "time only") and expose it
-        on your dashboard so the window can be changed without
-        editing the automation.
+        Earliest time of day the controller is allowed to start a
+        session. Create a time-only input_datetime helper and expose
+        it on a dashboard so you can shift the window without editing
+        the automation.
       selector:
         entity:
           domain: input_datetime
@@ -209,8 +237,10 @@ blueprint:
     window_end:
       name: Charging window end (input_datetime)
       description: >
-        input_datetime helper (time only) defining when the charging
-        window closes.
+        Latest time of day the controller will start a new session. By
+        default, an active session is allowed to continue past this
+        (so a late-afternoon charge isn't cut off). Use the hard-stop
+        toggle below to change that.
       selector:
         entity:
           domain: input_datetime
@@ -218,17 +248,23 @@ blueprint:
     hard_stop_at_window_end:
       name: Hard-stop running session at window end
       description: >
-        When off (default), a session that started inside the window is
-        allowed to run past window_end. When on, the controller ends
-        the session as soon as the window closes.
+        Off (default): a session that started inside the window keeps
+        running until the SOC cap or solar runs out, even if that's
+        after the window closes. On: the session is forced to stop the
+        moment the window closes — useful only if you have strict
+        time-of-use restrictions.
       default: false
       selector:
         boolean:
 
     min_charge_amps:
       name: Minimum charge current (A)
-      description: Fleet API supports down to 1 A (~690 W on 3-phase).
-        The Tesla app minimum is 5 A.
+      description: >
+        The lowest the controller will set the charge current. Tesla's
+        Fleet API allows down to 1 A (~690 W on 3-phase, ~230 W on
+        single-phase); the Tesla app forces a 5 A floor. Lower = more
+        session runtime on weak solar; higher = closer to what the car
+        expects.
       default: 1
       selector:
         number:
@@ -240,9 +276,11 @@ blueprint:
     max_charge_amps:
       name: Maximum charge current (A)
       description: >
-        Hardware ceiling for the charge current. Set to your Wall
-        Connector's installed circuit rating (commonly 16 A for AU /
-        EU 3-phase, 32 to 48 A for US single-phase).
+        Hardware ceiling for the charge current. Set to your wall
+        connector's installed circuit rating — typically 16 A on AU/EU
+        3-phase, 32–48 A on US single-phase. The controller also
+        clamps against the Tesla integration's own max, so the actual
+        ceiling is whichever is lower.
       default: 16
       selector:
         number:
@@ -254,10 +292,11 @@ blueprint:
     export_threshold_amps:
       name: Export buffer (A per line)
       description: >
-        Safety margin kept between available export and the charge
-        current setpoint, in amps per phase. Higher values reduce
-        the risk of brief grid imports at the cost of a small amount
-        of unused export. Set to 0 for the most aggressive tracking.
+        Safety cushion subtracted from available export before
+        deciding the charge current. Higher = less chance of brief
+        grid imports but slightly less solar captured; 0 = most
+        aggressive tracking. Default 1 A per phase ≈ 230 W per phase
+        headroom.
       default: 1
       selector:
         number:
@@ -269,10 +308,10 @@ blueprint:
     restart_hysteresis_amps:
       name: Restart hysteresis (A)
       description: >
-        How far above the minimum charge current available export
-        must rise before the controller starts (or restarts) a
-        session. Prevents the controller from oscillating between
-        starting and stopping right at the minimum threshold.
+        Extra solar headroom required before restarting a session that
+        just stopped at the minimum. Prevents the controller from
+        oscillating on/off right at the minimum threshold when solar
+        hovers around the bare minimum surplus.
       default: 0.5
       selector:
         number:
@@ -284,14 +323,11 @@ blueprint:
     fast_ramp_headroom_amps:
       name: Fast ramp-up headroom (A)
       description: >
-        When available export jumps ahead of the current setpoint by
-        at least this many amps, the controller ramps directly to
-        the target in a single step instead of the default +1 A per
-        minute. Recovers quickly from a cloud-clearing event at the
-        cost of larger setpoint changes (the car can sometimes
-        complain about abrupt changes). Set to a very large value
-        (e.g. 20) to disable fast ramp-up and always use the +1 A
-        cap.
+        When solar suddenly jumps far ahead of where the controller is
+        currently set (e.g. a cloud clears), it normally ramps up
+        gradually at +1 A per minute. If the jump is at least this
+        many amps, it leaps to the new target in a single step
+        instead. Set very high (e.g. 20) to always crawl up.
       default: 3
       selector:
         number:
@@ -303,11 +339,11 @@ blueprint:
     stability_delay_seconds:
       name: Stability delay on ramp-up (s)
       description: >
-        How long the controller waits between successive ramp-up
-        steps when conditions are stable. Longer values are kinder
-        to the car and the contactor; shorter values track rising
-        solar more aggressively. Automatically skipped during the
-        post-trim fast-recovery window after an import spike.
+        How long to pause between successive +1 A ramp-up steps when
+        solar is steadily climbing. Longer = gentler on the car and
+        contactor; shorter = aggressive tracking of rising solar.
+        Skipped automatically right after an import-spike trim so
+        recovery is fast.
       default: 60
       selector:
         number:
@@ -319,10 +355,11 @@ blueprint:
     post_trim_fast_recovery_seconds:
       name: Post-trim fast-recovery window (s)
       description: >
-        Only used when "Last import-spike trim timestamp" is set. If
-        a ramp-up happens within this many seconds of the last trim,
-        the stability delay is skipped so the session recovers
-        quickly from a brief import spike.
+        After a brief import spike (kettle, oven) trims the charge
+        current down, the controller ignores the stability delay for
+        this many seconds. Lets the session recover quickly instead of
+        being pinned at the post-trim current. Only effective when the
+        'Last import-spike trim' helper is configured.
       default: 180
       selector:
         number:
@@ -334,8 +371,11 @@ blueprint:
     import_threshold_w:
       name: Import-spike trim threshold (W)
       description: >
-        Meter-noise filter. Grid import above this triggers an instant
-        current trim. Set above your meter's typical noise floor.
+        Minimum grid import (in watts) that counts as a real import
+        event for the trim logic. Below this, the controller treats it
+        as meter noise and ignores it. Default 50 W suits most modern
+        meters; raise if you see false trims from background appliance
+        jitter.
       default: 50
       selector:
         number:
@@ -347,9 +387,10 @@ blueprint:
     import_safety_margin_amps:
       name: Import-spike trim safety margin (A)
       description: >
-        Extra amps subtracted on top of the computed trim. The
-        computed trim already uses ceiling rounding, so 0 is usually
-        safe; bump to 1 if your meter is twitchy.
+        Extra amps to subtract on top of the calculated trim during an
+        import spike. The trim math already uses ceiling rounding, so
+        0 is fine for accurate meters; bump to 1 if your meter is
+        noisy and overshoots regularly.
       default: 0
       selector:
         number:
@@ -361,10 +402,11 @@ blueprint:
     stop_grace_seconds:
       name: Grace at minimum before stopping (s)
       description: >
-        Hold at minimum amps this long before ending the session when
-        export sits below the minimum charge current. If solar
-        recovers during the window, the timer aborts automatically
-        and no stop happens.
+        How long to hold the session at minimum amps before giving up
+        when solar can't sustain even the minimum. Longer = more
+        tolerant of cloud-cover gaps; shorter = quicker to release the
+        grid. If solar recovers during this window, the timer aborts
+        and the session continues normally.
       default: 180
       selector:
         number:
@@ -376,16 +418,12 @@ blueprint:
     max_soc:
       name: Preferred SOC cap (%)
       description: >
-        Local stop threshold for solar charging. The controller stops
-        the session when SOC reaches this value; it does NOT write
-        anything to the Tesla. The car-side limit (set in the Tesla
-        app, exposed as the optional charge-limit number above) is
-        honoured as a hard ceiling, so the effective stop point is
-        whichever is lower. Example: car-side limit 80 %, Preferred
-        cap 60 % means home solar charging stops at 60 % while a
-        Supercharger session still goes to 80 %. Overridden by the
-        Boost SOC cap below when the Solcast forecast boost is
-        active.
+        Local stop point — the controller stops solar charging when
+        the car reaches this SOC. Enforced LOCALLY only; the car's
+        Tesla-app limit is left untouched, so a Supercharger session
+        can still charge past this. Effective stop = lower of this and
+        the Tesla-app limit (when the car-side limit entity is
+        configured).
       default: 90
       selector:
         number:
@@ -397,11 +435,11 @@ blueprint:
     restart_soc_hysteresis:
       name: Restart SOC hysteresis (%)
       description: >
-        After stopping at the effective SOC cap, the controller
-        won't restart a session until SOC has dropped this many
-        percentage points below the cap. Prevents tiny
-        post-cap relaunches caused by Tesla vampire drain bleeding
-        SOC back below the cap on a sunny day.
+        After stopping at the cap, the controller won't restart a
+        fresh session until SOC drops at least this many points below
+        the cap. Prevents tiny relaunches caused by Tesla vampire
+        drain slowly bleeding SOC back below the cap on a sunny day.
+        Default 2 % suits typical drain rates.
       default: 2
       selector:
         number:
@@ -410,16 +448,15 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
-    # ── Ramp-up rate limiter ────────────────────────────────────
     start_verify_seconds:
       name: Start verification timeout (s)
       description: >
-        After turning the charge switch on, the controller waits
-        up to this many seconds for the contactor to actually
-        close. If it doesn't, the controller treats the start as
-        failed, releases the optional session start lock, and
-        suppresses the "Solar Charging Started" notification so
-        a future tick can retry cleanly.
+        After commanding the car to start charging, the controller
+        waits up to this many seconds for the wall connector to
+        actually pass current. If it doesn't (silent Tesla API drop,
+        car wedged), the controller assumes the start failed,
+        suppresses the 'Started' notification, and clears its locks so
+        the next minute's evaluation can cleanly retry.
       default: 60
       selector:
         number:
@@ -428,18 +465,16 @@ blueprint:
           step: 5
           unit_of_measurement: s
 
-    # ── Notification dedupe ─────────────────────────────────────
     boost_soc:
       name: Boost SOC cap (%)
       description: >
-        Raised local stop threshold used on a "last sunny day before
-        bad weather" according to the Solcast forecast inputs below.
-        Same semantics as the Preferred SOC cap: local-only, not
-        pushed to the car, and capped by the car-side limit. To
-        actually fill above the Preferred cap, the car-side limit
-        must be at or above this value. Should be at or above the
-        Preferred SOC cap. Has no effect unless at least the "today"
-        and "+1 day" Solcast sensors are provided.
+        Higher stop point used on a 'last sunny day before bad
+        weather'. The controller raises the effective cap from the
+        regular max to this value when Solcast forecasts a sunny today
+        and a poor next few days. Useful for stashing extra charge
+        before a wet week. Must be ≥ Preferred SOC cap; also gated by
+        the Tesla-app limit. Set equal to the Preferred cap to disable
+        boosting.
       default: 90
       selector:
         number:
@@ -451,9 +486,10 @@ blueprint:
     solcast_today_kwh:
       name: Solcast forecast today (kWh) (optional)
       description: >
-        Sensor that reports today's total forecast PV production in kWh
-        (e.g. sensor.solcast_pv_forecast_forecast_today). Required to
-        enable the forecast boost; leave empty to disable.
+        OPTIONAL. Solcast sensor for today's total predicted PV
+        production in kWh (typical name
+        `sensor.solcast_pv_forecast_forecast_today`). REQUIRED if you
+        want the forecast boost feature; leave empty to disable.
       default: ""
       selector:
         entity:
@@ -462,8 +498,9 @@ blueprint:
     solcast_tomorrow_kwh:
       name: Solcast forecast tomorrow / +1 day (kWh) (optional)
       description: >
-        e.g. sensor.solcast_pv_forecast_forecast_tomorrow. Required to
-        enable the forecast boost; leave empty to disable.
+        OPTIONAL. Solcast sensor for tomorrow's predicted production.
+        REQUIRED for the boost (the controller needs to compare today
+        vs upcoming days).
       default: ""
       selector:
         entity:
@@ -471,7 +508,11 @@ blueprint:
 
     solcast_day_3_kwh:
       name: Solcast forecast day 3 / +2 days (kWh) (optional)
-      description: e.g. sensor.solcast_pv_forecast_forecast_day_3
+      description: >
+        OPTIONAL further forecast day. NOTE Solcast's naming is off by
+        one: `day_3` is +2 days from today, not +3. The lookahead
+        reads days in order and stops at the first one you leave
+        empty.
       default: ""
       selector:
         entity:
@@ -479,7 +520,9 @@ blueprint:
 
     solcast_day_4_kwh:
       name: Solcast forecast day 4 / +3 days (kWh) (optional)
-      description: e.g. sensor.solcast_pv_forecast_forecast_day_4
+      description: >
+        OPTIONAL. +3 days from today (see note on day_3 about Solcast
+        naming).
       default: ""
       selector:
         entity:
@@ -487,7 +530,8 @@ blueprint:
 
     solcast_day_5_kwh:
       name: Solcast forecast day 5 / +4 days (kWh) (optional)
-      description: e.g. sensor.solcast_pv_forecast_forecast_day_5
+      description: >
+        OPTIONAL. +4 days from today.
       default: ""
       selector:
         entity:
@@ -495,7 +539,8 @@ blueprint:
 
     solcast_day_6_kwh:
       name: Solcast forecast day 6 / +5 days (kWh) (optional)
-      description: e.g. sensor.solcast_pv_forecast_forecast_day_6
+      description: >
+        OPTIONAL. +5 days from today.
       default: ""
       selector:
         entity:
@@ -503,7 +548,8 @@ blueprint:
 
     solcast_day_7_kwh:
       name: Solcast forecast day 7 / +6 days (kWh) (optional)
-      description: e.g. sensor.solcast_pv_forecast_forecast_day_7
+      description: >
+        OPTIONAL. +6 days from today.
       default: ""
       selector:
         entity:
@@ -512,12 +558,11 @@ blueprint:
     boost_lookahead_days:
       name: Boost lookahead (days)
       description: >
-        How many forecast days after today to inspect when deciding
-        whether to boost. ALL inspected days must be at or below the
-        "bad day" threshold AND today must be at or above the "sunny
-        day" threshold to activate the boost. Capped by how many
-        Solcast sensors you provided (in order: tomorrow, day 3, day
-        4, ... day 7); the lookahead stops at the first gap.
+        How many days ahead to look when deciding if today is the
+        'last sunny day before bad weather'. ALL inspected days must
+        be at/below the bad-day threshold AND today must be at/above
+        the sunny-day threshold for the boost to activate. Capped by
+        how many Solcast sensors you configured.
       default: 2
       selector:
         number:
@@ -529,9 +574,10 @@ blueprint:
     boost_today_min_kwh:
       name: Boost "sunny today" threshold (kWh)
       description: >
-        Today's forecast must be at or above this to count as sunny
-        enough to justify boosting the cap. Set to your typical
-        good-day production minus a margin.
+        Today's forecast must be at least this much (in kWh) to count
+        as 'sunny enough' to justify boosting the cap. Set to your
+        typical good-day production minus a margin (e.g. if a good day
+        is 30 kWh, set this to 25).
       default: 25
       selector:
         number:
@@ -543,8 +589,10 @@ blueprint:
     boost_bad_day_max_kwh:
       name: Boost "bad day" threshold (kWh)
       description: >
-        A forecast day is considered "bad" when its total is at or
-        below this value.
+        A forecast day counts as 'bad' (and thus worth boosting
+        today's charge to compensate) when its forecast is at or below
+        this. Set to your typical overcast-day production (usually
+        8–12 kWh in temperate climates).
       default: 12
       selector:
         number:
@@ -556,16 +604,12 @@ blueprint:
     prioritize_load_booleans:
       name: Prioritize Tesla over these loads (optional)
       description: >
-        Optional list of input_boolean entities that gate other
-        power-hungry automations (e.g. AC units, pool pump). When
-        the Tesla SOC drops below the threshold during the charging
-        window, the controller turns these OFF so the Tesla gets
-        priority on solar export. They are turned back ON as soon
-        as the Tesla reaches the effective SOC cap (Preferred or
-        Boost, capped by the car-side limit), when the vehicle is
-        unplugged from the charger, and also at window close as a
-        safety net if neither has happened. Leave empty to disable
-        this feature.
+        OPTIONAL. List of input_boolean helpers that gate other
+        power-hungry automations (AC, pool pump, dryer, etc.). When
+        Tesla SOC is below the threshold below, the controller turns
+        these OFF so the Tesla gets first claim on solar. They're
+        turned back ON when SOC reaches the cap, when the car is
+        unplugged, and at window close as a safety net.
       default: []
       selector:
         entity:
@@ -575,9 +619,10 @@ blueprint:
     prioritize_below_soc:
       name: Prioritize Tesla below SOC (%)
       description: >
-        Tesla SOC threshold below which the prioritize-loads above
-        are disabled. Only has effect when "Prioritize Tesla over
-        these loads" is configured.
+        Only pause the other loads while Tesla SOC is below this.
+        Above this, the Tesla is 'comfortable enough' and shares solar
+        with the other automations normally. Only takes effect when
+        the load-priority list above is configured.
       default: 40
       selector:
         number:
@@ -589,19 +634,14 @@ blueprint:
     deferrable_load_sensors:
       name: Deferrable load power sensors (optional)
       description: >
-        Optional list of POWER sensors (W or kW) for loads that
-        automatically yield to other consumers, such as a myenergi
-        eddi solar diverter (e.g. sensor.myenergi_eddi_internal_load_ct1)
-        or any "surplus soaking" appliance you would rather have the
-        Tesla outbid. Their combined consumption is added to the
-        available export budget (capped at the solar-fed portion, so
-        we never double-count grid-imported power), letting the Tesla
-        ramp up; the diverter then backs off naturally as export
-        falls. The import-spike trim ignores transient import that is
-        still covered by the configured deferrable loads, so brief
-        ramp-up overshoots don't trigger an immediate trim. Sensors
-        must report POSITIVE values when consuming. Leave empty to
-        disable this feature.
+        OPTIONAL. List of POWER sensors for loads that yield
+        automatically when other consumers ramp up — typically a solar
+        diverter (myenergi eddi, Solic 200, etc.) heating your hot
+        water from PV surplus. Their consumption counts as headroom
+        for the Tesla, so the car can outbid them. Don't use for
+        non-yielding loads (kettle, oven) — those won't back off.
+        Don't use for diverters wired upstream of the grid CT —
+        they're already invisible to the export sensor.
       default: []
       selector:
         entity:
@@ -612,11 +652,11 @@ blueprint:
     home_battery_soc:
       name: Home battery SOC sensor (%) (optional)
       description: >
-        Optional sensor reporting house battery state-of-charge
-        (Powerwall, Sungrow, BYD, etc.). When provided together
-        with a reserve below, the Tesla controller treats the
-        battery as having first claim on solar until it reaches
-        the reserve.
+        OPTIONAL. If you have a hybrid inverter with a house battery
+        (Powerwall, Sungrow, BYD, Sigenergy, etc.), point this at the
+        battery's SOC sensor. The controller will hold off claiming
+        solar for the Tesla until the battery is above the reserve
+        below.
       default: ""
       selector:
         entity:
@@ -625,12 +665,12 @@ blueprint:
     home_battery_reserve_soc:
       name: Home battery reserve SOC (%)
       description: >
-        While the house battery sits below this SOC, the Tesla
-        controller does not claim any export — the inverter is
-        left to charge the house battery first. Set to 0 to
-        disable (Tesla competes with the house battery for
-        export normally). Only takes effect when the home
-        battery SOC sensor above is provided.
+        How full the house battery should be before the Tesla starts
+        claiming solar. E.g. 80 means 'fill the battery to 80 % first,
+        then let the Tesla have whatever's left'. Higher = battery
+        gets priority for longer; 0 = no priority (Tesla and battery
+        compete normally). Only matters when the sensor above is
+        configured.
       default: 0
       selector:
         number:
@@ -639,18 +679,15 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
-    # ── Boost snapshot ──────────────────────────────────────────
     session_lock:
       name: Session start lock (optional)
       description: >
-        input_boolean used as a re-entry lock to dedupe "Solar
-        Charging Started" notifications when the start logic fires
-        a second time during its 15 s car-wake delay. The
-        controller turns it ON at the very start of a session and
-        OFF when the contactor opens (or on HA restart if it was
-        stuck). Leave empty to disable the lock; duplicate
-        "Started" notifications are then possible if the start
-        logic re-enters during the 15 s wake delay.
+        OPTIONAL but recommended. Dedupes 'Solar Charging Started'
+        notifications — the controller can evaluate the start logic
+        more than once during the 15 s wake delay, and without this
+        lock you'd get duplicate notifications. Create an
+        input_boolean and point this at it. Auto-clears on contactor
+        open, HA restart, or unplug.
       default: ""
       selector:
         entity:
@@ -659,28 +696,24 @@ blueprint:
     session_start_soc:
       name: Session start SOC tracker (optional)
       description: >
-        input_number (0 to 100, step 1) that the controller writes
-        to at the start of each charging session, so end-of-session
-        notifications can include a "charged from X% (+Y%)" summary.
-        The controller WRITES this entity each time a session starts;
-        you don't interact with it directly. Leave empty to skip the
-        summary suffix on stop notifications.
+        OPTIONAL. Used to add a 'charged from X% (+Y%)' summary to
+        session-end notifications. Create an input_number (0–100, step
+        1); the controller writes the car's SOC to it at each session
+        start and reads it back at the stop. You never interact with
+        it manually.
       default: ""
       selector:
         entity:
           domain: input_number
 
-    # ── Stop-side SOC hysteresis ────────────────────────────────
     last_guard_trim:
       name: Last import-spike trim timestamp (optional)
       description: >
-        input_datetime (with date + time) stamped each time the
-        controller trims current in response to a grid-import
-        spike. When set, the controller skips its stability delay
-        for ramp-up steps that happen within the post-trim
-        fast-recovery window, so recovery from a brief import
-        spike isn't held back for a full stability delay. Leave
-        empty to disable fast recovery.
+        OPTIONAL. Required for the post-trim fast-recovery feature.
+        Create an input_datetime (date + time). The controller stamps
+        it each time it trims charge current in response to a
+        grid-import spike; the timestamp is then used to skip the
+        stability delay during the recovery window.
       default: ""
       selector:
         entity:
@@ -689,30 +722,27 @@ blueprint:
     last_ramp_up_at:
       name: Last ramp-up timestamp (optional)
       description: >
-        input_datetime (date + time) the controller stamps each
-        time it raises the charge current. When provided, the
-        ramp-up branch waits at least "Stability delay on ramp-up"
-        seconds between successive raises, properly rate-limiting
-        ramp-up across the parallel execution slots (the in-action
-        delay alone cannot do this because new triggers spawn
-        fresh runs). Leave empty to fall back to the old behaviour
-        of one in-action delay per evaluation.
+        OPTIONAL. Properly rate-limits ramp-up across the controller's
+        parallel-execution model. Without this, on a noisy meter the
+        controller can sometimes ramp up faster than the stability
+        delay would suggest. Create an input_datetime (date + time).
+        Leave empty if your meter updates calmly (≤ 1/minute) — the
+        basic delay is enough.
       default: ""
       selector:
         entity:
           domain: input_datetime
 
-    # ── Start-success verification ──────────────────────────────
     boost_session_lock:
       name: Boost session lock (input_boolean, optional)
       description: >
-        Optional input_boolean the controller turns ON at the
-        start of a session if the Solcast forecast boost is
-        active at that moment, and OFF when the session ends.
-        While ON, the controller keeps using the Boost SOC cap
-        even if Solcast briefly flips the boost off mid-day
-        (e.g. midnight rollover, sensor blip), preventing the
-        cap from dropping under the live SOC mid-charge.
+        OPTIONAL but strongly recommended whenever the forecast boost
+        is configured. Without it, a brief Solcast 'unavailable'
+        mid-day can drop the cap from Boost back to regular and
+        immediately end your session at the lower cap. Create an
+        input_boolean and the controller will latch it ON at the start
+        of a boost session, ignoring forecast changes until the
+        session ends.
       default: ""
       selector:
         entity:
@@ -721,7 +751,9 @@ blueprint:
     notify_service:
       name: Notify service (optional)
       description: >
-        e.g. notify.mobile_app_phone. Blank disables notifications.
+        OPTIONAL. Name of an HA notify service to send session and
+        lifecycle events to (e.g. `notify.mobile_app_phone`). Leave
+        empty to disable all notifications.
       default: ""
       selector:
         text:
@@ -729,11 +761,10 @@ blueprint:
     session_min_gain_for_notify:
       name: Minimum SOC gain for session-end notifications (%)
       description: >
-        Suppress "Solar Session Ended" and "Solar Window Closed"
-        notifications when the session didn't actually move SOC
-        by at least this much. Avoids notification storms on
-        cloudy days where the controller keeps starting and
-        stopping. Set to 0 to always notify.
+        Suppress session-end notifications when the session didn't
+        actually move SOC by at least this much. Stops cloudy-day
+        start/stop cycling from spamming your phone with low-value
+        'session ended +0.3%' messages. Set to 0 to always notify.
       default: 1
       selector:
         number:
@@ -742,7 +773,6 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
-    # ── Home battery awareness ──────────────────────────────────
 mode: parallel
 max: 10
 max_exceeded: silent
