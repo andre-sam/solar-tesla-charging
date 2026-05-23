@@ -906,7 +906,10 @@ trigger:
     above: !input import_threshold_w
     id: import_spike
 
-  # Lifecycle notifications.
+  # Lifecycle notifications. Each lifecycle trigger is duplicated
+  # with id: tick so the controller re-evaluates immediately
+  # instead of waiting up to 60 s for the next per-minute tick —
+  # plug in, enable, and the session starts within seconds.
   - platform: state
     entity_id: !input vehicle_connected
     to: "on"
@@ -914,10 +917,21 @@ trigger:
       seconds: 2
     id: plugged_in
   - platform: state
+    entity_id: !input vehicle_connected
+    to: "on"
+    for:
+      seconds: 2
+    id: tick
+  - platform: state
     entity_id: !input enable_toggle
     from: "off"
     to: "on"
     id: enabled
+  - platform: state
+    entity_id: !input enable_toggle
+    from: "off"
+    to: "on"
+    id: tick
   - platform: state
     entity_id: !input enable_toggle
     from: "on"
@@ -1335,6 +1349,8 @@ action:
       # the contactor never closed (e.g. user toggled enable off
       # during the 15 s wake delay). Without this, the lock stays
       # ON indefinitely and blocks future starts until HA restart.
+      # Also clear the optional boost session lock for the same
+      # reason — Branch 5 claims it before the wake delay.
       # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
@@ -1342,14 +1358,25 @@ action:
           - condition: state
             entity_id: !input contactor_closed
             state: "off"
-          - condition: template
-            value_template: >
-              {{ session_lock | length > 0
-                 and is_state(session_lock, 'on') }}
         sequence:
-          - service: input_boolean.turn_off
-            target:
-              entity_id: "{{ session_lock }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ session_lock | length > 0
+                     and is_state(session_lock, 'on') }}
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ session_lock }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ boost_session_lock | length > 0
+                     and is_state(boost_session_lock, 'on') }}
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ boost_session_lock }}"
 
       # ─────────────────────────────────────────────────────────────
       # SESSION ENDED: contactor opened and stayed open 10 s.
