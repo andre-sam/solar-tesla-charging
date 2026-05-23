@@ -167,29 +167,6 @@ blueprint:
         entity:
           domain: button
 
-    last_guard_trim:
-      name: Last import-spike trim timestamp (optional)
-      description: >
-        input_datetime (with date + time) stamped each time the
-        controller trims current in response to a grid-import
-        spike. When set, the controller skips its stability delay
-        for ramp-up steps that happen within the post-trim
-        fast-recovery window, so recovery from a brief import
-        spike isn't held back for a full stability delay. Leave
-        empty to disable fast recovery.
-      default: ""
-      selector:
-        entity:
-          domain: input_datetime
-
-    notify_service:
-      name: Notify service (optional)
-      description: >
-        e.g. notify.mobile_app_phone. Blank disables notifications.
-      default: ""
-      selector:
-        text:
-
     line_voltage:
       name: Line voltage (V)
       description: >
@@ -217,20 +194,36 @@ blueprint:
           max: 3
           step: 1
 
-    export_threshold_amps:
-      name: Export buffer (A per line)
+    window_start:
+      name: Charging window start (input_datetime)
       description: >
-        Safety margin kept between available export and the charge
-        current setpoint, in amps per phase. Higher values reduce
-        the risk of brief grid imports at the cost of a small amount
-        of unused export. Set to 0 for the most aggressive tracking.
-      default: 1
+        input_datetime helper (time only) defining when the charging
+        window opens. Create once in HA (Settings -> Devices &
+        services -> Helpers -> Date/time, "time only") and expose it
+        on your dashboard so the window can be changed without
+        editing the automation.
       selector:
-        number:
-          min: 0
-          max: 10
-          step: 0.5
-          unit_of_measurement: A
+        entity:
+          domain: input_datetime
+
+    window_end:
+      name: Charging window end (input_datetime)
+      description: >
+        input_datetime helper (time only) defining when the charging
+        window closes.
+      selector:
+        entity:
+          domain: input_datetime
+
+    hard_stop_at_window_end:
+      name: Hard-stop running session at window end
+      description: >
+        When off (default), a session that started inside the window is
+        allowed to run past window_end. When on, the controller ends
+        the session as soon as the window closes.
+      default: false
+      selector:
+        boolean:
 
     min_charge_amps:
       name: Minimum charge current (A)
@@ -256,6 +249,21 @@ blueprint:
           min: 6
           max: 48
           step: 1
+          unit_of_measurement: A
+
+    export_threshold_amps:
+      name: Export buffer (A per line)
+      description: >
+        Safety margin kept between available export and the charge
+        current setpoint, in amps per phase. Higher values reduce
+        the risk of brief grid imports at the cost of a small amount
+        of unused export. Set to 0 for the most aggressive tracking.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.5
           unit_of_measurement: A
 
     restart_hysteresis_amps:
@@ -292,6 +300,79 @@ blueprint:
           step: 1
           unit_of_measurement: A
 
+    stability_delay_seconds:
+      name: Stability delay on ramp-up (s)
+      description: >
+        How long the controller waits between successive ramp-up
+        steps when conditions are stable. Longer values are kinder
+        to the car and the contactor; shorter values track rising
+        solar more aggressively. Automatically skipped during the
+        post-trim fast-recovery window after an import spike.
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 180
+          step: 5
+          unit_of_measurement: s
+
+    post_trim_fast_recovery_seconds:
+      name: Post-trim fast-recovery window (s)
+      description: >
+        Only used when "Last import-spike trim timestamp" is set. If
+        a ramp-up happens within this many seconds of the last trim,
+        the stability delay is skipped so the session recovers
+        quickly from a brief import spike.
+      default: 180
+      selector:
+        number:
+          min: 0
+          max: 600
+          step: 30
+          unit_of_measurement: s
+
+    import_threshold_w:
+      name: Import-spike trim threshold (W)
+      description: >
+        Meter-noise filter. Grid import above this triggers an instant
+        current trim. Set above your meter's typical noise floor.
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 500
+          step: 10
+          unit_of_measurement: W
+
+    import_safety_margin_amps:
+      name: Import-spike trim safety margin (A)
+      description: >
+        Extra amps subtracted on top of the computed trim. The
+        computed trim already uses ceiling rounding, so 0 is usually
+        safe; bump to 1 if your meter is twitchy.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 1
+          unit_of_measurement: A
+
+    stop_grace_seconds:
+      name: Grace at minimum before stopping (s)
+      description: >
+        Hold at minimum amps this long before ending the session when
+        export sits below the minimum charge current. If solar
+        recovers during the window, the timer aborts automatically
+        and no stop happens.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 900
+          step: 30
+          unit_of_measurement: s
+
     max_soc:
       name: Preferred SOC cap (%)
       description: >
@@ -313,6 +394,41 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
+    restart_soc_hysteresis:
+      name: Restart SOC hysteresis (%)
+      description: >
+        After stopping at the effective SOC cap, the controller
+        won't restart a session until SOC has dropped this many
+        percentage points below the cap. Prevents tiny
+        post-cap relaunches caused by Tesla vampire drain bleeding
+        SOC back below the cap on a sunny day.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 1
+          unit_of_measurement: "%"
+
+    # ── Ramp-up rate limiter ────────────────────────────────────
+    start_verify_seconds:
+      name: Start verification timeout (s)
+      description: >
+        After turning the charge switch on, the controller waits
+        up to this many seconds for the contactor to actually
+        close. If it doesn't, the controller treats the start as
+        failed, releases the optional session start lock, and
+        suppresses the "Solar Charging Started" notification so
+        a future tick can retry cleanly.
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 180
+          step: 5
+          unit_of_measurement: s
+
+    # ── Notification dedupe ─────────────────────────────────────
     boost_soc:
       name: Boost SOC cap (%)
       description: >
@@ -437,110 +553,6 @@ blueprint:
           step: 1
           unit_of_measurement: kWh
 
-    stability_delay_seconds:
-      name: Stability delay on ramp-up (s)
-      description: >
-        How long the controller waits between successive ramp-up
-        steps when conditions are stable. Longer values are kinder
-        to the car and the contactor; shorter values track rising
-        solar more aggressively. Automatically skipped during the
-        post-trim fast-recovery window after an import spike.
-      default: 60
-      selector:
-        number:
-          min: 0
-          max: 180
-          step: 5
-          unit_of_measurement: s
-
-    post_trim_fast_recovery_seconds:
-      name: Post-trim fast-recovery window (s)
-      description: >
-        Only used when "Last import-spike trim timestamp" is set. If
-        a ramp-up happens within this many seconds of the last trim,
-        the stability delay is skipped so the session recovers
-        quickly from a brief import spike.
-      default: 180
-      selector:
-        number:
-          min: 0
-          max: 600
-          step: 30
-          unit_of_measurement: s
-
-    stop_grace_seconds:
-      name: Grace at minimum before stopping (s)
-      description: >
-        Hold at minimum amps this long before ending the session when
-        export sits below the minimum charge current. If solar
-        recovers during the window, the timer aborts automatically
-        and no stop happens.
-      default: 180
-      selector:
-        number:
-          min: 30
-          max: 900
-          step: 30
-          unit_of_measurement: s
-
-    import_threshold_w:
-      name: Import-spike trim threshold (W)
-      description: >
-        Meter-noise filter. Grid import above this triggers an instant
-        current trim. Set above your meter's typical noise floor.
-      default: 50
-      selector:
-        number:
-          min: 10
-          max: 500
-          step: 10
-          unit_of_measurement: W
-
-    import_safety_margin_amps:
-      name: Import-spike trim safety margin (A)
-      description: >
-        Extra amps subtracted on top of the computed trim. The
-        computed trim already uses ceiling rounding, so 0 is usually
-        safe; bump to 1 if your meter is twitchy.
-      default: 0
-      selector:
-        number:
-          min: 0
-          max: 2
-          step: 1
-          unit_of_measurement: A
-
-    hard_stop_at_window_end:
-      name: Hard-stop running session at window end
-      description: >
-        When off (default), a session that started inside the window is
-        allowed to run past window_end. When on, the controller ends
-        the session as soon as the window closes.
-      default: false
-      selector:
-        boolean:
-
-    window_start:
-      name: Charging window start (input_datetime)
-      description: >
-        input_datetime helper (time only) defining when the charging
-        window opens. Create once in HA (Settings -> Devices &
-        services -> Helpers -> Date/time, "time only") and expose it
-        on your dashboard so the window can be changed without
-        editing the automation.
-      selector:
-        entity:
-          domain: input_datetime
-
-    window_end:
-      name: Charging window end (input_datetime)
-      description: >
-        input_datetime helper (time only) defining when the charging
-        window closes.
-      selector:
-        entity:
-          domain: input_datetime
-
     prioritize_load_booleans:
       name: Prioritize Tesla over these loads (optional)
       description: >
@@ -597,106 +609,6 @@ blueprint:
           device_class: power
           multiple: true
 
-    session_lock:
-      name: Session start lock (optional)
-      description: >
-        input_boolean used as a re-entry lock to dedupe "Solar
-        Charging Started" notifications when the start logic fires
-        a second time during its 15 s car-wake delay. The
-        controller turns it ON at the very start of a session and
-        OFF when the contactor opens (or on HA restart if it was
-        stuck). Leave empty to disable the lock; duplicate
-        "Started" notifications are then possible if the start
-        logic re-enters during the 15 s wake delay.
-      default: ""
-      selector:
-        entity:
-          domain: input_boolean
-
-    session_start_soc:
-      name: Session start SOC tracker (optional)
-      description: >
-        input_number (0 to 100, step 1) that the controller writes
-        to at the start of each charging session, so end-of-session
-        notifications can include a "charged from X% (+Y%)" summary.
-        The controller WRITES this entity each time a session starts;
-        you don't interact with it directly. Leave empty to skip the
-        summary suffix on stop notifications.
-      default: ""
-      selector:
-        entity:
-          domain: input_number
-
-    # ── Stop-side SOC hysteresis ────────────────────────────────
-    restart_soc_hysteresis:
-      name: Restart SOC hysteresis (%)
-      description: >
-        After stopping at the effective SOC cap, the controller
-        won't restart a session until SOC has dropped this many
-        percentage points below the cap. Prevents tiny
-        post-cap relaunches caused by Tesla vampire drain bleeding
-        SOC back below the cap on a sunny day.
-      default: 2
-      selector:
-        number:
-          min: 0
-          max: 10
-          step: 1
-          unit_of_measurement: "%"
-
-    # ── Ramp-up rate limiter ────────────────────────────────────
-    last_ramp_up_at:
-      name: Last ramp-up timestamp (optional)
-      description: >
-        input_datetime (date + time) the controller stamps each
-        time it raises the charge current. When provided, the
-        ramp-up branch waits at least "Stability delay on ramp-up"
-        seconds between successive raises, properly rate-limiting
-        ramp-up across the parallel execution slots (the in-action
-        delay alone cannot do this because new triggers spawn
-        fresh runs). Leave empty to fall back to the old behaviour
-        of one in-action delay per evaluation.
-      default: ""
-      selector:
-        entity:
-          domain: input_datetime
-
-    # ── Start-success verification ──────────────────────────────
-    start_verify_seconds:
-      name: Start verification timeout (s)
-      description: >
-        After turning the charge switch on, the controller waits
-        up to this many seconds for the contactor to actually
-        close. If it doesn't, the controller treats the start as
-        failed, releases the optional session start lock, and
-        suppresses the "Solar Charging Started" notification so
-        a future tick can retry cleanly.
-      default: 60
-      selector:
-        number:
-          min: 10
-          max: 180
-          step: 5
-          unit_of_measurement: s
-
-    # ── Notification dedupe ─────────────────────────────────────
-    session_min_gain_for_notify:
-      name: Minimum SOC gain for session-end notifications (%)
-      description: >
-        Suppress "Solar Session Ended" and "Solar Window Closed"
-        notifications when the session didn't actually move SOC
-        by at least this much. Avoids notification storms on
-        cloudy days where the controller keeps starting and
-        stopping. Set to 0 to always notify.
-      default: 1
-      selector:
-        number:
-          min: 0
-          max: 20
-          step: 1
-          unit_of_measurement: "%"
-
-    # ── Home battery awareness ──────────────────────────────────
     home_battery_soc:
       name: Home battery SOC sensor (%) (optional)
       description: >
@@ -728,6 +640,69 @@ blueprint:
           unit_of_measurement: "%"
 
     # ── Boost snapshot ──────────────────────────────────────────
+    session_lock:
+      name: Session start lock (optional)
+      description: >
+        input_boolean used as a re-entry lock to dedupe "Solar
+        Charging Started" notifications when the start logic fires
+        a second time during its 15 s car-wake delay. The
+        controller turns it ON at the very start of a session and
+        OFF when the contactor opens (or on HA restart if it was
+        stuck). Leave empty to disable the lock; duplicate
+        "Started" notifications are then possible if the start
+        logic re-enters during the 15 s wake delay.
+      default: ""
+      selector:
+        entity:
+          domain: input_boolean
+
+    session_start_soc:
+      name: Session start SOC tracker (optional)
+      description: >
+        input_number (0 to 100, step 1) that the controller writes
+        to at the start of each charging session, so end-of-session
+        notifications can include a "charged from X% (+Y%)" summary.
+        The controller WRITES this entity each time a session starts;
+        you don't interact with it directly. Leave empty to skip the
+        summary suffix on stop notifications.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+
+    # ── Stop-side SOC hysteresis ────────────────────────────────
+    last_guard_trim:
+      name: Last import-spike trim timestamp (optional)
+      description: >
+        input_datetime (with date + time) stamped each time the
+        controller trims current in response to a grid-import
+        spike. When set, the controller skips its stability delay
+        for ramp-up steps that happen within the post-trim
+        fast-recovery window, so recovery from a brief import
+        spike isn't held back for a full stability delay. Leave
+        empty to disable fast recovery.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
+
+    last_ramp_up_at:
+      name: Last ramp-up timestamp (optional)
+      description: >
+        input_datetime (date + time) the controller stamps each
+        time it raises the charge current. When provided, the
+        ramp-up branch waits at least "Stability delay on ramp-up"
+        seconds between successive raises, properly rate-limiting
+        ramp-up across the parallel execution slots (the in-action
+        delay alone cannot do this because new triggers spawn
+        fresh runs). Leave empty to fall back to the old behaviour
+        of one in-action delay per evaluation.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
+
+    # ── Start-success verification ──────────────────────────────
     boost_session_lock:
       name: Boost session lock (input_boolean, optional)
       description: >
@@ -743,6 +718,31 @@ blueprint:
         entity:
           domain: input_boolean
 
+    notify_service:
+      name: Notify service (optional)
+      description: >
+        e.g. notify.mobile_app_phone. Blank disables notifications.
+      default: ""
+      selector:
+        text:
+
+    session_min_gain_for_notify:
+      name: Minimum SOC gain for session-end notifications (%)
+      description: >
+        Suppress "Solar Session Ended" and "Solar Window Closed"
+        notifications when the session didn't actually move SOC
+        by at least this much. Avoids notification storms on
+        cloudy days where the controller keeps starting and
+        stopping. Set to 0 to always notify.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 1
+          unit_of_measurement: "%"
+
+    # ── Home battery awareness ──────────────────────────────────
 mode: parallel
 max: 10
 max_exceeded: silent
