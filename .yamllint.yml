@@ -1,0 +1,24 @@
+extends: default
+
+rules:
+  # HA blueprints are long-form by design; the controller is ~2 kloc.
+  line-length: disable
+  # Blueprint description fields use multi-line block scalars freely.
+  document-start: disable
+  # Comments often have only one leading space for readability.
+  comments:
+    min-spaces-from-content: 1
+    require-starting-space: false
+  comments-indentation: disable
+  # HA allows boolean-like keys (e.g. `to: "on"`) and indentation
+  # patterns that the default profile flags. Relax to "warning" so
+  # CI doesn't block on cosmetic issues.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  truthy:
+    check-keys: false
+  # Templates routinely produce long single-line expressions.
+  empty-lines:
+    max: 2
+    max-end: 1

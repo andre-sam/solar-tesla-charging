@@ -84,6 +84,32 @@ changes within seconds rather than at the next minute boundary.
   entities are unavailable, the controller skips its per-minute
   evaluation rather than logging service-call errors. Resumes
   automatically as soon as the API recovers.
+- **Restart SOC hysteresis**: after stopping at the cap, won't
+  restart until SOC has drained back below `cap - hysteresis`,
+  so vampire drain can't trigger tiny post-cap relaunches.
+- **Start verification**: after turning the switch on, waits for
+  the contactor to actually close. A silent Fleet API drop
+  releases the session locks and skips the "Started" notification
+  so the next tick can retry cleanly.
+- **Mid-session fault stop**: if the wall connector reports
+  `fault` / `faulted` / `error` / `offline` while charging, the
+  controller stops and notifies.
+- Optional **ramp-up rate limiter** (`input_datetime` helper):
+  properly serialises ramp-up across the parallel-execution slots
+  by gating on elapsed time, fixing the case where new state-
+  change triggers bypass the in-action stability delay.
+- Optional **boost session lock**: snapshots the Solcast boost at
+  session start so the cap doesn't drop below live SOC mid-day
+  if the forecast flips.
+- Optional **grid top-up safety net**: a deadline + floor pair
+  that falls back to fixed-current grid charging when prolonged
+  poor weather keeps the car under the floor.
+- Optional **home battery awareness**: while the house battery is
+  below its reserve SOC, the Tesla controller treats export as
+  zero so the inverter charges the battery first.
+- **Notification dedupe**: session-end notifications are
+  suppressed if the session didn't move SOC by at least a
+  configurable amount, so cloudy-day cycles stay quiet.
 - Robust against missing or unavailable sensors throughout. Each
   branch checks its inputs first and skips silently rather than
   running on bad data.
@@ -106,6 +132,20 @@ the new controller and configure it once.
 In Home Assistant: **Settings -> Automations -> Blueprints -> Import
 Blueprint**, then paste the raw GitHub URL of
 `solar_tesla_controller.yaml`.
+
+### Pinning to a release
+
+For a stable install that won't change unexpectedly, import from a
+tagged release instead of `main`:
+
+```
+https://github.com/andre-sam/solar-tesla-charging/blob/v1.0.0/solar_tesla_controller.yaml
+```
+
+The [Releases page](https://github.com/andre-sam/solar-tesla-charging/releases)
+lists every version. Use the URL from a release tag to pin; use
+the `main` URL to always track the latest (may include in-progress
+changes).
 
 ## Required entities
 
@@ -159,6 +199,26 @@ Optional:
   "charged from X% (+Y%)" summary to stop notifications. You don't
   interact with it directly. Leave the input empty to skip the
   summary suffix.
+- An **`input_datetime`** (date + time) as a last-ramp-up timestamp
+  (e.g. `input_datetime.solar_charging_last_ramp_up`). When set,
+  the controller properly rate-limits Branch 6 ramp-up steps across
+  parallel-execution slots using the stability delay. Without this
+  helper, the in-action delay only single-shots the originating
+  trigger; new state-change ticks can still spawn fresh ramps. See
+  [Ramp-up rate limiting](#ramp-up-rate-limiting-optional).
+- An **`input_boolean`** as a boost session lock (e.g.
+  `input_boolean.solar_charging_boost_active`). Latched ON at the
+  start of a session if the Solcast boost is live at that moment;
+  keeps the Boost SOC cap in force for the whole session even if
+  the live forecast flips off mid-day. Cleared automatically on
+  session end. Only meaningful when the forecast boost is also
+  configured.
+- A **home battery SOC sensor** plus a reserve threshold to make
+  the controller yield to the house battery while it's below the
+  reserve. See [Home battery awareness](#home-battery-awareness-optional).
+- An **`input_datetime`** (time only) plus a floor SOC to enable a
+  grid top-up safety net for prolonged poor weather. See
+  [Grid top-up safety net](#grid-top-up-safety-net-optional).
 - **Solcast PV Forecast** daily-total sensors for the forecast boost.
   Pick today, tomorrow, and as many of `day_3` to `day_7` as you
   want (the lookahead input chooses how far ahead to inspect):
@@ -396,6 +456,109 @@ Leave the input empty to skip the lock; duplicate "Started"
 notifications are then possible if the start logic re-enters
 during the wake delay.
 
+## Restart hysteresis
+
+After Branch 1 stops a session at the effective SOC cap, the
+Tesla idles plugged in and vampire drain slowly bleeds the SOC
+back below the cap. Without hysteresis the controller would
+restart a fresh session as soon as SOC dropped to `cap - 0.1`,
+contributing nothing useful and producing notification storms.
+
+The **Restart SOC hysteresis (%)** input (default 2) bars Branch
+5 from restarting until SOC has fallen at least that far below
+the effective cap. Set to 0 to restore the old behaviour.
+
+## Ramp-up rate limiting (optional)
+
+The controller runs in `mode: parallel, max: 10` so a fast
+import trim can pre-empt a slow ramp. As a side-effect, the
+in-action `delay` in Branch 6 only single-shots the originating
+run — any new state-change tick spawns a fresh parallel run that
+re-evaluates and writes immediately, bypassing the stability
+delay.
+
+Configure the optional **Last ramp-up timestamp** input
+(`input_datetime` with date + time, e.g.
+`input_datetime.solar_charging_last_ramp_up`) and the controller
+stamps it on every raise. Subsequent ramp-up attempts in any
+parallel slot then check elapsed time against
+`stability_delay_seconds` and skip if not enough time has passed.
+The post-trim fast-recovery window still bypasses the gate for
+quick cloud-clearing recovery.
+
+Without this helper, ramp-down is unaffected and ramp-up still
+works — it just isn't strictly rate-limited.
+
+## Start verification
+
+After turning the charge switch on, the controller now waits up
+to **Start verification timeout (s)** (default 60) for the
+contactor to actually close. If it doesn't (silent Fleet API
+drop, car wedged mid-wake, etc.), the controller:
+
+- Releases the session start lock and the boost session lock so
+  a future tick can retry.
+- Suppresses the "Solar Charging Started" notification so you
+  don't get a "started" message for a session that never
+  actually started.
+
+This eliminates the failure mode where a stuck `session_lock`
+blocked further restart attempts until HA restart.
+
+## Notification dedupe by SOC gain
+
+Cloudy days used to produce a stream of "Started" → "Session
+Ended" notifications when the controller cycled the session
+multiple times without meaningful progress. The
+**Minimum SOC gain for session-end notifications (%)** input
+(default 1) suppresses the grace-stop, SOC-cap, window-close,
+and grid-top-up notifications when SOC didn't move by at least
+that much during the session. Set to 0 to always notify.
+
+## Grid top-up safety net (optional)
+
+For prolonged poor weather, you can configure a deadline + floor
+so the controller falls back to grid charging:
+
+| Input | Role |
+|---|---|
+| **Minimum SOC floor (%)** | If SOC is below this at the deadline, start a grid session. Set to 0 to disable. |
+| **Minimum SOC deadline** (`input_datetime`, time only) | When (within the charging window) to start the top-up if the car is still below the floor. |
+| **Grid top-up current (A)** | Fixed current used during top-up (e.g. 8 A ≈ 1.8 kW on 230 V single-phase). |
+
+Behaviour:
+
+- Branch 5b starts a session at the configured top-up current
+  even when there is no solar export. Notifies "Grid Top-Up
+  Started".
+- Branch 5c stops the session as soon as SOC reaches the floor
+  (without waiting for the effective SOC cap or grace timer).
+  Notifies "Grid Top-Up Complete" (subject to the gain dedupe
+  above).
+- Honours cross-midnight charging windows.
+- Capped at the Tesla app limit; never charges above it.
+
+Leave the deadline input or the floor empty (`0`) to disable the
+safety net entirely. The default behaviour is unchanged.
+
+## Home battery awareness (optional)
+
+On installs with a hybrid inverter and a house battery (Powerwall,
+Sungrow SBR, BYD, Sigenergy, etc.), you can have the Tesla yield
+to the house battery while it is still topping up:
+
+| Input | Role |
+|---|---|
+| **Home battery SOC sensor (%)** | Battery state-of-charge sensor. Leave empty to disable. |
+| **Home battery reserve SOC (%)** | While the battery is below this SOC, the Tesla controller treats available export as zero. Set to 0 to disable (Tesla competes normally). |
+
+The export sensor signal is unchanged; the controller just stops
+claiming export below the reserve so the inverter sends surplus
+to the battery. Once the battery hits the reserve, the Tesla
+ramps up normally. Fail-open: if the sensor is unavailable, the
+gate is treated as not configured (so a flaky sensor can't
+silently prevent the Tesla from ever charging).
+
 ## Tuning for cloudy / fluctuating solar
 
 The defaults are tuned for stable solar with a generous buffer.
@@ -428,20 +591,120 @@ execute alongside a slow ramp.
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
-| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Adds any configured deferrable load consumption (capped at the solar-fed portion) to the available export budget. Skipped when Tesla Fleet API entities are unavailable. |
-| `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session and notify. |
-| `ha_start_reconcile` | HA start | Clear stale stateful flags (below-minimum tracker, session start lock) if no session is running. |
-| `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. Import covered by configured deferrable loads is treated as expected ramp-up overshoot and skipped. |
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic, including the mid-session wall-connector fault stop and the grid top-up start/stop. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Adds any configured deferrable load consumption (capped at the solar-fed portion) to the available export budget. Treats available export as zero while a configured home battery is below its reserve. Skipped when Tesla Fleet API entities are unavailable. |
+| `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session, clear locks, and notify (subject to the SOC-gain dedupe). |
+| `ha_start_reconcile` | HA start | Clear stale stateful flags (below-minimum tracker, session start lock, boost session lock) if no session is running. |
+| `import_spike` | Grid import crosses above `import_threshold_w` | Compute and apply a current trim if import exceeds the threshold. Import covered by configured deferrable loads is treated as expected ramp-up overshoot and skipped. The numeric-state edge trigger replaces the old per-change trigger so sub-threshold meter chatter doesn't fill the parallel-execution slot pool. |
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
-| `disabled` | Enable toggle goes OFF mid-session | Stop the charger (turn off `charge_switch`, clear `below_min_flag`, restore prioritize-loads) and notify. Also clears the session start lock if the contactor never closed. |
-| `unplugged` | Vehicle-connected goes OFF for 10 s | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. Also clears the session start lock if it was claimed but the contactor never closed. |
+| `disabled` | Enable toggle goes OFF mid-session | Stop the charger (turn off `charge_switch`, clear `below_min_flag`, restore prioritize-loads) and notify. Also clears the session and boost locks if the contactor never closed. |
+| `unplugged` | Vehicle-connected goes OFF for 10 s | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. Also clears the session and boost locks if claimed but the contactor never closed. |
 | `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
-| `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session start lock so a future start can fire. |
+| `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session and boost locks so a future start can fire. |
 
 The import trim only ever ramps current down; only the per-minute
 `tick` branch can stop or restart a session, so there's no risk of
-the two branches fighting each other.
+the two branches fighting each other. Branch 5 ("Start / resume")
+and Branch 5b ("Grid top-up start") both verify the contactor
+actually closes after the switch is turned on, and roll back the
+locks plus suppress the "Started" notification if it doesn't.
+
+## Troubleshooting
+
+Each item is **Symptom → Likely cause → Fix**.
+
+**Tesla never starts charging even on a sunny day.**
+The export sensor sign is wrong. The blueprint expects
+`grid_export_power_negative` to read **below 0 W when exporting**.
+Quick check: while you're actively pushing power to the grid, look
+at the configured sensor — if it's a positive number, your
+underlying meter reports export as positive, not negative. Wrap it
+in a template sensor that multiplies by `-1`, or pick the correct
+signed register from your meter integration.
+
+**Tesla overshoots and imports from the grid on a 3-phase install.**
+`phase_count` mismatch. The blueprint assumes your grid sensor
+reports **total** grid power across all phases (typical for
+whole-house meters like Shelly EM, Enphase, Powerwall). If your
+sensor reports per-phase watts, set `phase_count` to 1 — the math
+already accounts for "watts per amp = line_voltage × phase_count"
+and a per-phase reading is effectively single-phase from the
+controller's perspective.
+
+**Deferrable load awareness double-counts; every ramp-up causes a
+brief grid import.** The diverter is wired *upstream* of the grid
+CT, so its consumption is already netted out of your export
+reading. Adding the diverter's sensor to **Deferrable load power
+sensors** then credits it a second time. Fix: leave that input
+empty for upstream-wired diverters.
+
+**Charging stops at a lower SOC than the Preferred cap.** The
+Tesla app charge limit is below the Preferred cap. The effective
+stop is `min(local_cap, car_side_limit)`. Either raise the limit
+in the Tesla app or accept the lower stop point.
+
+**Charging stops at the Preferred cap even on a "boost" day.**
+The Tesla app limit is below the Boost cap, so the boost is gated
+by the car-side limit. Raise the Tesla app limit to at least the
+Boost cap if you want forecast-driven boosting to actually fill
+higher.
+
+**Boost dropped mid-day and the session ended at the Preferred cap
+instead of the Boost cap.** The optional **Boost session lock**
+helper isn't configured. Without it, a brief Solcast unavailable
+flips `boost_active` off mid-day; the cap drops from Boost to
+Preferred, and if the current SOC is already above Preferred,
+Branch 1 fires immediately. Fix: create a dedicated
+`input_boolean` (e.g. `input_boolean.solar_charging_boost_active`)
+and configure it in the **Boost session lock** input. The
+controller latches it ON at session start and ignores the live
+forecast until the session ends.
+
+**`max_charge_amps` setting appears ignored.** The controller
+clamps against the Tesla `number` entity's own `max` attribute. If
+the Tesla integration exposes the entity with `max: 16` and you've
+set 32 A in the blueprint, you'll get 16 A. This is intentional —
+the integration's max is the authoritative ceiling.
+
+**"+X%" delta in the end-of-session notification is smaller than
+expected.** `session_start_soc` is overwritten on every Branch 5
+entry, so the "+X%" is measured from the **last contactor close**,
+not the start of the day. If the session stopped and restarted
+during cloud cover (e.g. via grace stop + resume), the delta only
+covers the final segment. Documented behaviour.
+
+**"Solar Charging Started" notification fires but the car doesn't
+actually charge.** Tesla Fleet API call was accepted but the car
+was wedged or the integration dropped the request silently. With
+**Start verification timeout (s)** (default 60), the controller
+now suppresses this notification when `contactor_closed` doesn't
+flip to ON within that window. If you're still seeing premature
+"Started" messages: check that the wall-connector
+`contactor_closed` binary sensor actually responds when current is
+flowing (some integrations expose only the `status` text sensor
+reliably).
+
+**Notifications went quiet during cloudy weather.** Working as
+intended. **Minimum SOC gain for session-end notifications (%)**
+(default 1) suppresses the grace-stop / SOC-cap / window-close
+notifications when SOC didn't move by at least that much. Set to
+0 if you want every cycle reported.
+
+**Tesla wakes but charging won't start.** The car's status is
+probably `unknown` and the wake button either isn't configured or
+didn't connect. Verify the **Tesla wake-up button** input is set
+to the integration's wake `button.*` entity. Cold cars and cars
+in deep sleep occasionally need longer than the built-in 15 s
+wake delay; if you see this regularly, raising the delay would
+require a code change rather than a config tweak.
+
+**Solcast forecast boost never activates even though tomorrow looks
+bad.** Solcast's sensor naming is off by one: `forecast_day_3` is
+**+2 days from today**, not +3. Configure today + tomorrow +
+day_3 + day_4 if you want a 3-day lookahead. The README's
+[Forecast boost](#forecast-boost-optional) section has a note on
+this, but it's still the most common Solcast configuration
+mistake.
 
 ## License
 

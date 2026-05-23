@@ -40,7 +40,7 @@ blueprint:
     https://github.com/andre-sam/solar-tesla-charging
 
   domain: automation
-  source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/blueprints/automation/solar_tesla/solar_tesla_controller.yaml
+  source_url: https://github.com/andre-sam/solar-tesla-charging/blob/main/solar_tesla_controller.yaml
   input:
     enable_toggle:
       name: Master enable toggle
@@ -627,6 +627,166 @@ blueprint:
         entity:
           domain: input_number
 
+    # ── Stop-side SOC hysteresis ────────────────────────────────
+    restart_soc_hysteresis:
+      name: Restart SOC hysteresis (%)
+      description: >
+        After stopping at the effective SOC cap, the controller
+        won't restart a session until SOC has dropped this many
+        percentage points below the cap. Prevents tiny
+        post-cap relaunches caused by Tesla vampire drain bleeding
+        SOC back below the cap on a sunny day.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 1
+          unit_of_measurement: "%"
+
+    # ── Ramp-up rate limiter ────────────────────────────────────
+    last_ramp_up_at:
+      name: Last ramp-up timestamp (optional)
+      description: >
+        input_datetime (date + time) the controller stamps each
+        time it raises the charge current. When provided, the
+        ramp-up branch waits at least "Stability delay on ramp-up"
+        seconds between successive raises, properly rate-limiting
+        ramp-up across the parallel execution slots (the in-action
+        delay alone cannot do this because new triggers spawn
+        fresh runs). Leave empty to fall back to the old behaviour
+        of one in-action delay per evaluation.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
+
+    # ── Start-success verification ──────────────────────────────
+    start_verify_seconds:
+      name: Start verification timeout (s)
+      description: >
+        After turning the charge switch on, the controller waits
+        up to this many seconds for the contactor to actually
+        close. If it doesn't, the controller treats the start as
+        failed, releases the optional session start lock, and
+        suppresses the "Solar Charging Started" notification so
+        a future tick can retry cleanly.
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 180
+          step: 5
+          unit_of_measurement: s
+
+    # ── Notification dedupe ─────────────────────────────────────
+    session_min_gain_for_notify:
+      name: Minimum SOC gain for session-end notifications (%)
+      description: >
+        Suppress "Solar Session Ended" and "Solar Window Closed"
+        notifications when the session didn't actually move SOC
+        by at least this much. Avoids notification storms on
+        cloudy days where the controller keeps starting and
+        stopping. Set to 0 to always notify.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 1
+          unit_of_measurement: "%"
+
+    # ── Grid top-up safety net ──────────────────────────────────
+    minimum_soc_floor:
+      name: Minimum SOC floor (%) (optional)
+      description: >
+        Safety-net floor for prolonged poor weather. If the car's
+        SOC is below this value at the deadline below, the
+        controller will charge from the grid (regardless of solar
+        export) up to this SOC. Set to 0 to disable. Honoured only
+        when "Minimum SOC by time" is also provided.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    minimum_soc_by_time:
+      name: Minimum SOC deadline (input_datetime, optional)
+      description: >
+        input_datetime (time only) that pairs with the floor above.
+        Once the current time is past this and SOC is still below
+        the floor, the controller starts a session from the grid
+        at "Grid top-up current" and ends it as soon as SOC
+        reaches the floor. Leave empty to disable the safety net.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
+
+    grid_topup_amps:
+      name: Grid top-up current (A)
+      description: >
+        Charge current used while the grid top-up safety net is
+        active. Set conservatively to match your tariff plan
+        (e.g. 8 A on a single-phase 230 V supply ≈ 1.8 kW).
+      default: 8
+      selector:
+        number:
+          min: 1
+          max: 48
+          step: 1
+          unit_of_measurement: A
+
+    # ── Home battery awareness ──────────────────────────────────
+    home_battery_soc:
+      name: Home battery SOC sensor (%) (optional)
+      description: >
+        Optional sensor reporting house battery state-of-charge
+        (Powerwall, Sungrow, BYD, etc.). When provided together
+        with a reserve below, the Tesla controller treats the
+        battery as having first claim on solar until it reaches
+        the reserve.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    home_battery_reserve_soc:
+      name: Home battery reserve SOC (%)
+      description: >
+        While the house battery sits below this SOC, the Tesla
+        controller does not claim any export — the inverter is
+        left to charge the house battery first. Set to 0 to
+        disable (Tesla competes with the house battery for
+        export normally). Only takes effect when the home
+        battery SOC sensor above is provided.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    # ── Boost snapshot ──────────────────────────────────────────
+    boost_session_lock:
+      name: Boost session lock (input_boolean, optional)
+      description: >
+        Optional input_boolean the controller turns ON at the
+        start of a session if the Solcast forecast boost is
+        active at that moment, and OFF when the session ends.
+        While ON, the controller keeps using the Boost SOC cap
+        even if Solcast briefly flips the boost off mid-day
+        (e.g. midnight rollover, sensor blip), preventing the
+        cap from dropping under the live SOC mid-charge.
+      default: ""
+      selector:
+        entity:
+          domain: input_boolean
+
 mode: parallel
 max: 10
 max_exceeded: silent
@@ -679,6 +839,16 @@ variables:
   deferrable_load_sensors: !input deferrable_load_sensors
   session_lock: !input session_lock
   session_start_soc: !input session_start_soc
+  restart_soc_hysteresis: !input restart_soc_hysteresis
+  last_ramp_up_at: !input last_ramp_up_at
+  start_verify_seconds: !input start_verify_seconds
+  session_min_gain_for_notify: !input session_min_gain_for_notify
+  minimum_soc_floor: !input minimum_soc_floor
+  minimum_soc_by_time: !input minimum_soc_by_time
+  grid_topup_amps: !input grid_topup_amps
+  home_battery_soc: !input home_battery_soc
+  home_battery_reserve_soc: !input home_battery_reserve_soc
+  boost_session_lock: !input boost_session_lock
 
 trigger:
   # Main controller evaluator: runs every minute, on HA start, and on
@@ -708,12 +878,6 @@ trigger:
   - platform: state
     entity_id: !input battery_soc
     id: tick
-  - platform: state
-    entity_id: !input wall_connector_power
-    id: tick
-  - platform: state
-    entity_id: !input charge_current_number
-    id: tick
 
   # Grace stop: if the below-minimum flag stays on for the full grace
   # window, the session is ended. If export recovers before then, the
@@ -732,11 +896,14 @@ trigger:
     event: start
     id: ha_start_reconcile
 
-  # Import-spike trim: any change to grid import re-evaluates whether
-  # we need to ramp down immediately. The action condition filters on
-  # the threshold.
-  - platform: state
+  # Import-spike trim: only fire when import is meaningfully above
+  # the noise floor, so per-second meter chatter doesn't fill the
+  # parallel-execution slot pool. The numeric_state edge trigger
+  # fires once per crossing; the action then re-reads the live
+  # value and recomputes the trim.
+  - platform: numeric_state
     entity_id: !input grid_import_power
+    above: !input import_threshold_w
     id: import_spike
 
   # Lifecycle notifications.
@@ -816,18 +983,32 @@ action:
               entity_id: !input below_min_flag
           - if:
               - condition: template
-                value_template: "{{ notify_service | length > 0 }}"
+                value_template: >
+                  {{ boost_session_lock | length > 0
+                     and is_state(boost_session_lock, 'on') }}
             then:
-              - variables:
-                  now_soc_val: "{{ states(battery_soc) | float(0) }}"
-                  start_soc_val: >
-                    {{ states(session_start_soc) | float(0)
-                       if session_start_soc else 0 }}
-                  delta_suffix: >
-                    {%- if start_soc_val > 0 and now_soc_val > start_soc_val %}
-                    Charged from {{ start_soc_val | round(0) | int }}%
-                    (+{{ (now_soc_val - start_soc_val) | round(0) | int }}%).
-                    {%- endif %}
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ boost_session_lock }}"
+          - variables:
+              now_soc_val: "{{ states(battery_soc) | float(0) }}"
+              start_soc_val: >
+                {{ states(session_start_soc) | float(0)
+                   if session_start_soc else 0 }}
+              gain_pts: "{{ now_soc_val - start_soc_val }}"
+              notify_session_end: >
+                {{ start_soc_val == 0
+                   or gain_pts >= (session_min_gain_for_notify | float(0)) }}
+              delta_suffix: >
+                {%- if start_soc_val > 0 and now_soc_val > start_soc_val %}
+                Charged from {{ start_soc_val | round(0) | int }}%
+                (+{{ (now_soc_val - start_soc_val) | round(0) | int }}%).
+                {%- endif %}
+          - if:
+              - condition: template
+                value_template: >
+                  {{ notify_service | length > 0 and notify_session_end }}
+            then:
               - service: "{{ notify_service }}"
                 data:
                   title: "☁️ Solar Session Ended"
@@ -869,6 +1050,15 @@ action:
               - service: input_boolean.turn_off
                 target:
                   entity_id: "{{ session_lock }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ boost_session_lock | length > 0
+                     and is_state(boost_session_lock, 'on') }}
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ boost_session_lock }}"
 
       # ─────────────────────────────────────────────────────────────
       # IMPORT-SPIKE TRIM: instantly ramp current down if any grid
@@ -1068,6 +1258,15 @@ action:
               - service: input_boolean.turn_off
                 target:
                   entity_id: "{{ session_lock }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ boost_session_lock | length > 0
+                     and is_state(boost_session_lock, 'on') }}
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ boost_session_lock }}"
 
       # DISABLED mid-session: stop the charger. The per-minute tick
       # branch is gated on enable_toggle == on, so without an
@@ -1161,14 +1360,25 @@ action:
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'session_ended' }}"
-          - condition: template
-            value_template: >
-              {{ session_lock | length > 0
-                 and is_state(session_lock, 'on') }}
         sequence:
-          - service: input_boolean.turn_off
-            target:
-              entity_id: "{{ session_lock }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ session_lock | length > 0
+                     and is_state(session_lock, 'on') }}
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ session_lock }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ boost_session_lock | length > 0
+                     and is_state(boost_session_lock, 'on') }}
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ boost_session_lock }}"
 
       # ─────────────────────────────────────────────────────────────
       # TICK: main ramp / start / SOC-cap / window-end evaluator.
@@ -1235,15 +1445,43 @@ action:
               effective_export_a: >
                 {{ (effective_export_w / line_voltage)
                    if effective_export_w > 0 else 0 }}
+              # House-battery reserve: when a home battery SOC sensor
+              # is configured and the battery is below its reserve,
+              # the Tesla yields the export entirely so the inverter
+              # can refill the battery first. Unavailable sensor =>
+              # treat as no reserve gate (fail-open; otherwise a flaky
+              # sensor would silently stop the Tesla from ever
+              # charging).
+              home_battery_soc_val: >
+                {% if home_battery_soc
+                   and states(home_battery_soc) | lower
+                       not in ['unavailable', 'unknown', 'none', ''] %}
+                  {{ states(home_battery_soc) | float(100) }}
+                {% else %}
+                  100
+                {% endif %}
+              home_battery_blocks_tesla: >
+                {{ home_battery_soc
+                   and (home_battery_reserve_soc | float(0)) > 0
+                   and home_battery_soc_val < (home_battery_reserve_soc | float(0)) }}
               available_amps: >
-                {% set a = (effective_export_a / phase_count) - export_threshold_amps %}
-                {{ [[a, 0] | max, max_charge_amps_cfg] | min | round(1) }}
+                {% if home_battery_blocks_tesla %}
+                  0
+                {% else %}
+                  {% set a = (effective_export_a / phase_count) - export_threshold_amps %}
+                  {{ [[a, 0] | max, max_charge_amps_cfg] | min | round(1) }}
+                {% endif %}
               min_charge_amps: "{{ [min_charge_amps_cfg, 1] | max }}"
               max_charge_amps: >
                 {{ [[state_attr(charge_current_number, 'max') | float(max_charge_amps_cfg),
                      max_charge_amps_cfg] | min,
                     min_charge_amps_cfg] | max }}
-              restart_charge_amps: "{{ min_charge_amps + restart_hysteresis_amps }}"
+              # Restart threshold clamped to max_charge_amps so a
+              # misconfigured (min + hysteresis) > max doesn't make
+              # Branch 5 permanently un-startable.
+              restart_charge_amps: >
+                {{ [min_charge_amps + restart_hysteresis_amps,
+                    max_charge_amps] | min }}
               current_set_amps: "{{ states(charge_current_number) | float(0) }}"
               status_text: "{{ states(wall_connector_status) | lower }}"
               # 'unknown', 'unavailable' and 'asleep' are deliberately
@@ -1305,7 +1543,7 @@ action:
                   {% endif %}
                 {% endfor %}
                 {{ ns.vals }}
-              boost_active: >
+              boost_active_live: >
                 {{ boost_soc > max_soc
                    and solcast_healthy
                    and solcast_today_val >= boost_today_min_kwh
@@ -1313,6 +1551,15 @@ action:
                    and forecast_upcoming_vals | length
                        == forecast_upcoming_sensors | length
                    and forecast_upcoming_vals | max <= boost_bad_day_max_kwh }}
+              # Snapshot: while the optional boost_session_lock is ON
+              # (latched at start of a boosted session), the boost
+              # stays active for the rest of the session even if the
+              # live forecast flips off mid-day. This prevents the
+              # cap from dropping below the live SOC mid-charge.
+              boost_locked: >
+                {{ boost_session_lock | length > 0
+                   and is_state(boost_session_lock, 'on') }}
+              boost_active: "{{ boost_active_live or boost_locked }}"
               preferred_cap: "{{ boost_soc if boost_active else max_soc }}"
               effective_limit: "{{ [preferred_cap, tesla_limit] | min }}"
               now_time: "{{ now().strftime('%H:%M:%S') }}"
@@ -1354,6 +1601,85 @@ action:
                 Charged from {{ start_soc_val | round(0) | int }}%
                 (+{{ (soc - start_soc_val) | round(0) | int }}%).
                 {%- endif %}
+              # ── Stop-side SOC hysteresis ────────────────────
+              # Bar restart until SOC has drained this many points
+              # below the cap (default 2 %). Prevents tiny
+              # post-cap relaunches from Tesla vampire drain.
+              restart_soc_threshold: >
+                {{ [effective_limit - (restart_soc_hysteresis | float(0)), 0] | max }}
+              # ── Ramp-up rate limiter ────────────────────────
+              # When the optional last_ramp_up_at helper is set,
+              # ramp-up steps in Branch 6 are gated on elapsed
+              # time so the parallel-execution model can't bypass
+              # the stability delay by spawning a fresh run on
+              # every state-change tick. Skipped during the
+              # post-trim fast-recovery window.
+              seconds_since_ramp_up: >
+                {% if last_ramp_up_at %}
+                  {% set ts = state_attr(last_ramp_up_at, 'timestamp') %}
+                  {% if ts is not none %}
+                    {{ now().timestamp() - (ts | float(0)) }}
+                  {% else %}
+                    99999
+                  {% endif %}
+                {% else %}
+                  99999
+                {% endif %}
+              ramp_up_allowed: >
+                {{ guard_trim_recent
+                   or (last_ramp_up_at | length == 0)
+                   or (seconds_since_ramp_up | float(99999)
+                       >= stability_delay_seconds) }}
+              # ── Notification gain gate ──────────────────────
+              # Suppress session-end notifications when the
+              # session didn't move SOC by at least this much.
+              # Avoids notification storms on cloudy days where
+              # the controller cycles repeatedly without
+              # meaningful progress.
+              notify_session_end: >
+                {{ start_soc_val == 0
+                   or (soc - start_soc_val)
+                      >= (session_min_gain_for_notify | float(0)) }}
+              # ── Mid-session fault detection ─────────────────
+              # If the wall connector reports a hard fault while
+              # the contactor is closed, stop the session. Branch
+              # 5 already blocks restarts on these statuses.
+              mid_session_fault: >
+                {{ is_state(contactor_closed, 'on')
+                   and status_text in blocking_statuses }}
+              # ── Grid top-up safety net ──────────────────────
+              # Active when both helpers configured, the deadline
+              # has passed, the car is still under the floor, and
+              # the window is open. Charges from the grid at
+              # grid_topup_amps until SOC hits the floor.
+              topup_floor: "{{ minimum_soc_floor | float(0) }}"
+              topup_enabled: >
+                {{ topup_floor > 0
+                   and minimum_soc_by_time | length > 0
+                   and states(minimum_soc_by_time) | lower
+                       not in ['unavailable', 'unknown', 'none', ''] }}
+              topup_deadline_str: >
+                {{ states(minimum_soc_by_time)
+                   if topup_enabled else '23:59:59' }}
+              topup_deadline_passed: >
+                {% if not topup_enabled %}
+                  false
+                {% elif window_start_str <= window_end_str %}
+                  {{ now_time >= topup_deadline_str
+                     and now_time < window_end_str }}
+                {% else %}
+                  {{ (now_time >= topup_deadline_str
+                      and (topup_deadline_str >= window_start_str
+                           or now_time < window_end_str))
+                     or (now_time < window_end_str
+                         and topup_deadline_str >= window_start_str) }}
+                {% endif %}
+              topup_needed: >
+                {{ topup_enabled
+                   and topup_deadline_passed
+                   and soc < topup_floor
+                   and soc < tesla_limit
+                   and window_open }}
           # Prioritize Tesla: if SOC is low during the charging
           # window, turn off the configured load booleans so the
           # Tesla gets priority on solar export. Filtered to loads
@@ -1395,6 +1721,40 @@ action:
                             for Tesla priority (SOC {{ soc | round(0) }}%,
                             threshold {{ prioritize_below_soc | round(0) }}%).
           - choose:
+              # ── Branch 0: Mid-session wall-connector fault ─────
+              # If the wall connector reports a hard fault while
+              # the contactor is closed, stop immediately. Branch
+              # 5 already blocks restarts on these statuses.
+              - conditions:
+                  - condition: template
+                    value_template: "{{ mid_session_fault }}"
+                sequence:
+                  - service: switch.turn_off
+                    target:
+                      entity_id: !input charge_switch
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: !input below_min_flag
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ boost_session_lock | length > 0
+                             and is_state(boost_session_lock, 'on') }}
+                    then:
+                      - service: input_boolean.turn_off
+                        target:
+                          entity_id: "{{ boost_session_lock }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ notify_service | length > 0 }}"
+                    then:
+                      - service: "{{ notify_service }}"
+                        data:
+                          title: "⚠️ Wall Connector Fault"
+                          message: >
+                            Wall connector reported "{{ status_text }}"
+                            mid-session. Stopped at {{ soc | round(0) }}%.
+
               # ── Branch 1: SOC cap reached ──────────────────────
               - conditions:
                   - condition: template
@@ -1408,6 +1768,17 @@ action:
                   - service: input_boolean.turn_off
                     target:
                       entity_id: !input below_min_flag
+                  # Release the optional boost session lock so the
+                  # next session re-evaluates the live forecast.
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ boost_session_lock | length > 0
+                             and is_state(boost_session_lock, 'on') }}
+                    then:
+                      - service: input_boolean.turn_off
+                        target:
+                          entity_id: "{{ boost_session_lock }}"
                   # Tesla is done charging for the day, so restore any
                   # prioritize-loads we paused earlier in the window.
                   - if:
@@ -1432,7 +1803,9 @@ action:
                               entity_id: "{{ prioritize_off_loads }}"
                   - if:
                       - condition: template
-                        value_template: "{{ notify_service | length > 0 }}"
+                        value_template: >
+                          {{ notify_service | length > 0
+                             and notify_session_end }}
                     then:
                       - service: "{{ notify_service }}"
                         data:
@@ -1460,7 +1833,18 @@ action:
                       entity_id: !input below_min_flag
                   - if:
                       - condition: template
-                        value_template: "{{ notify_service | length > 0 }}"
+                        value_template: >
+                          {{ boost_session_lock | length > 0
+                             and is_state(boost_session_lock, 'on') }}
+                    then:
+                      - service: input_boolean.turn_off
+                        target:
+                          entity_id: "{{ boost_session_lock }}"
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ notify_service | length > 0
+                             and notify_session_end }}
                     then:
                       - service: "{{ notify_service }}"
                         data:
@@ -1519,7 +1903,7 @@ action:
                          and is_state(vehicle_connected, 'on')
                          and status_text not in blocking_statuses
                          and available_amps >= restart_charge_amps
-                         and soc < effective_limit
+                         and soc < restart_soc_threshold
                          and (session_lock | length == 0
                               or is_state(session_lock, 'off')) }}
                 sequence:
@@ -1539,6 +1923,18 @@ action:
                       - service: input_boolean.turn_on
                         target:
                           entity_id: "{{ session_lock }}"
+                  # Latch the optional boost session lock so the cap
+                  # stays at the Boost SOC for the whole session
+                  # even if the live forecast flips off mid-day.
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ boost_session_lock | length > 0
+                             and boost_active_live }}
+                    then:
+                      - service: input_boolean.turn_on
+                        target:
+                          entity_id: "{{ boost_session_lock }}"
                   # Capture this session's starting SOC for the
                   # end-of-session summary suffix. Overwritten on
                   # each Branch 5 entry, so the suffix reports
@@ -1578,20 +1974,183 @@ action:
                   - service: input_boolean.turn_off
                     target:
                       entity_id: !input below_min_flag
+                  # Verify the start actually took: wait up to
+                  # start_verify_seconds for the contactor to close.
+                  # If it never does (silent API drop, car in a weird
+                  # state), release the session lock and suppress
+                  # the "Started" notification so a future tick can
+                  # retry cleanly instead of stranding the lock ON.
+                  - wait_template: "{{ is_state(contactor_closed, 'on') }}"
+                    timeout:
+                      seconds: "{{ start_verify_seconds | int }}"
+                    continue_on_timeout: true
+                  - choose:
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ wait.completed | default(false) }}"
+                        sequence:
+                          - if:
+                              - condition: template
+                                value_template: "{{ notify_service | length > 0 }}"
+                            then:
+                              - service: "{{ notify_service }}"
+                                data:
+                                  title: "☀️ Solar Charging Started"
+                                  message: >
+                                    Session started at {{ target_amps }} A
+                                    (SOC {{ soc | round(0) }}%, limit
+                                    {{ effective_limit | round(0) }}%{% if boost_active %},
+                                    forecast boost: today {{ solcast_today_val | round(1) }} kWh,
+                                    next {{ forecast_upcoming_vals | length }}d at or below
+                                    {{ boost_bad_day_max_kwh }} kWh{% endif %}).
+                    default:
+                      # Contactor never closed. Roll back the locks
+                      # so the next tick can retry.
+                      - if:
+                          - condition: template
+                            value_template: >
+                              {{ session_lock | length > 0
+                                 and is_state(session_lock, 'on') }}
+                        then:
+                          - service: input_boolean.turn_off
+                            target:
+                              entity_id: "{{ session_lock }}"
+                      - if:
+                          - condition: template
+                            value_template: >
+                              {{ boost_session_lock | length > 0
+                                 and is_state(boost_session_lock, 'on') }}
+                        then:
+                          - service: input_boolean.turn_off
+                            target:
+                              entity_id: "{{ boost_session_lock }}"
+
+              # ── Branch 5b: Grid top-up safety net ─────────────
+              # When the car is below the configured floor at the
+              # deadline, start a session at grid_topup_amps even
+              # if there is no solar export. Stops naturally when
+              # Branch 1 fires at the floor (effective_limit caps
+              # at the lower of the Tesla app limit and the local
+              # cap, but the floor is enforced via the below-min
+              # grace stop once solar can't sustain it). For pure
+              # grid top-up this just runs at fixed current until
+              # SOC reaches the floor or the window closes.
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ is_state(contactor_closed, 'off')
+                         and is_state(vehicle_connected, 'on')
+                         and status_text not in blocking_statuses
+                         and topup_needed
+                         and (session_lock | length == 0
+                              or is_state(session_lock, 'off')) }}
+                sequence:
+                  - variables:
+                      topup_amps_clamped: >
+                        {{ [[grid_topup_amps | int, max_charge_amps | int] | min,
+                            min_charge_amps | int] | max }}
                   - if:
                       - condition: template
-                        value_template: "{{ notify_service | length > 0 }}"
+                        value_template: "{{ session_lock | length > 0 }}"
+                    then:
+                      - service: input_boolean.turn_on
+                        target:
+                          entity_id: "{{ session_lock }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ session_start_soc | length > 0 }}"
+                    then:
+                      - service: input_number.set_value
+                        target:
+                          entity_id: "{{ session_start_soc }}"
+                        data:
+                          value: "{{ soc | round(0, 'floor') | int }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ wake_button | length > 0 }}"
+                    then:
+                      - service: button.press
+                        target:
+                          entity_id: !input wake_button
+                      - delay:
+                          seconds: 15
+                  - service: number.set_value
+                    target:
+                      entity_id: !input charge_current_number
+                    data:
+                      value: "{{ topup_amps_clamped }}"
+                  - delay:
+                      seconds: 3
+                  - service: switch.turn_on
+                    target:
+                      entity_id: !input charge_switch
+                  - wait_template: "{{ is_state(contactor_closed, 'on') }}"
+                    timeout:
+                      seconds: "{{ start_verify_seconds | int }}"
+                    continue_on_timeout: true
+                  - choose:
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ wait.completed | default(false) }}"
+                        sequence:
+                          - if:
+                              - condition: template
+                                value_template: "{{ notify_service | length > 0 }}"
+                            then:
+                              - service: "{{ notify_service }}"
+                                data:
+                                  title: "🔌 Grid Top-Up Started"
+                                  message: >
+                                    Solar fell short; topping up from grid
+                                    at {{ topup_amps_clamped }} A
+                                    (SOC {{ soc | round(0) }}%, floor
+                                    {{ topup_floor | round(0) }}%).
+                    default:
+                      - if:
+                          - condition: template
+                            value_template: >
+                              {{ session_lock | length > 0
+                                 and is_state(session_lock, 'on') }}
+                        then:
+                          - service: input_boolean.turn_off
+                            target:
+                              entity_id: "{{ session_lock }}"
+
+              # ── Branch 5c: Grid top-up stop at floor ──────────
+              # While a top-up session is running (effectively any
+              # active session past the deadline and below the
+              # floor), stop as soon as SOC reaches the floor —
+              # don't wait for the cap. This keeps grid usage
+              # minimal even when effective_limit is well above
+              # the floor.
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ is_state(contactor_closed, 'on')
+                         and topup_enabled
+                         and topup_deadline_passed
+                         and soc >= topup_floor
+                         and available_amps < min_charge_amps }}
+                sequence:
+                  - service: switch.turn_off
+                    target:
+                      entity_id: !input charge_switch
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: !input below_min_flag
+                  - if:
+                      - condition: template
+                        value_template: >
+                          {{ notify_service | length > 0
+                             and notify_session_end }}
                     then:
                       - service: "{{ notify_service }}"
                         data:
-                          title: "☀️ Solar Charging Started"
+                          title: "🔌 Grid Top-Up Complete"
                           message: >
-                            Session started at {{ target_amps }} A
-                            (SOC {{ soc | round(0) }}%, limit
-                            {{ effective_limit | round(0) }}%{% if boost_active %},
-                            forecast boost: today {{ solcast_today_val | round(1) }} kWh,
-                            next {{ forecast_upcoming_vals | length }}d at or below
-                            {{ boost_bad_day_max_kwh }} kWh{% endif %}).
+                            Reached floor of {{ topup_floor | round(0) }}%
+                            ({{ soc | round(0) }}%). Grid charging stopped.
+                            {{ delta_suffix }}
 
               # ── Branch 6: Adjust while charging ────────────────
               # No window_open check here unless hard_stop_at_window_end
@@ -1619,22 +2178,43 @@ action:
                         {% endif %}
                       is_ramp_up: >
                         {{ (target_amps | int) > (current_set_amps | int) }}
+                      should_write: >
+                        {{ target_amps | int != (current_set_amps | int)
+                           and (not is_ramp_up or ramp_up_allowed) }}
                   - if:
                       - condition: template
-                        value_template: >
-                          {{ target_amps | int != (current_set_amps | int) }}
+                        value_template: "{{ should_write }}"
                     then:
                       - service: number.set_value
                         target:
                           entity_id: !input charge_current_number
                         data:
                           value: "{{ target_amps }}"
-                      # Skip stability delay during the post-trim
-                      # fast-recovery window so brief import spikes
-                      # don't pin us low.
+                      # Stamp the ramp-up timestamp so subsequent
+                      # parallel runs honour the stability delay.
                       - if:
                           - condition: template
-                            value_template: "{{ is_ramp_up and not guard_trim_recent }}"
+                            value_template: >
+                              {{ is_ramp_up
+                                 and last_ramp_up_at | length > 0 }}
+                        then:
+                          - service: input_datetime.set_datetime
+                            target:
+                              entity_id: !input last_ramp_up_at
+                            data:
+                              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+                      # Fallback for installs without the timestamp
+                      # helper: hold this run for the stability
+                      # delay so at least the originating trigger
+                      # is single-shot. (Doesn't rate-limit other
+                      # parallel runs — that's what the helper
+                      # above is for.)
+                      - if:
+                          - condition: template
+                            value_template: >
+                              {{ is_ramp_up
+                                 and not guard_trim_recent
+                                 and last_ramp_up_at | length == 0 }}
                         then:
                           - delay:
                               seconds: "{{ stability_delay_seconds }}"
