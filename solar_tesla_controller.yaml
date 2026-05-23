@@ -861,6 +861,16 @@ trigger:
   - platform: state
     entity_id: !input battery_soc
     id: tick
+  # Wall-connector power and the charge-current number entity also
+  # drive ticks so the controller reacts immediately when the car's
+  # draw changes (clouds, appliance spikes, ramp settling) instead
+  # of waiting for the next grid-meter update.
+  - platform: state
+    entity_id: !input wall_connector_power
+    id: tick
+  - platform: state
+    entity_id: !input charge_current_number
+    id: tick
 
   # Grace stop: if the below-minimum flag stays on for the full grace
   # window, the session is ended. If export recovers before then, the
@@ -879,14 +889,16 @@ trigger:
     event: start
     id: ha_start_reconcile
 
-  # Import-spike trim: only fire when import is meaningfully above
-  # the noise floor, so per-second meter chatter doesn't fill the
-  # parallel-execution slot pool. The numeric_state edge trigger
-  # fires once per crossing; the action then re-reads the live
-  # value and recomputes the trim.
-  - platform: numeric_state
+  # Import-spike trim: any change to grid import re-evaluates whether
+  # we need to ramp down immediately. The action filters on the
+  # configured threshold, and parallel-run flooding is bounded by
+  # mode: parallel / max / max_exceeded: silent at the top of the
+  # automation. A numeric_state edge trigger was tried but only
+  # fires once per rising crossing, so a partial trim that left
+  # import above the threshold would never re-fire — causing the
+  # car to keep pulling from grid until the next per-minute tick.
+  - platform: state
     entity_id: !input grid_import_power
-    above: !input import_threshold_w
     id: import_spike
 
   # Lifecycle notifications. Each lifecycle trigger is duplicated
