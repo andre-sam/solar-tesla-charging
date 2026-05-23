@@ -1145,7 +1145,7 @@ action:
                 then:
                   - service: input_datetime.set_datetime
                     target:
-                      entity_id: !input last_guard_trim
+                      entity_id: "{{ last_guard_trim }}"
                     data:
                       datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
               - service: number.set_value
@@ -1985,7 +1985,7 @@ action:
                     then:
                       - service: button.press
                         target:
-                          entity_id: !input wake_button
+                          entity_id: "{{ wake_button }}"
                       - delay:
                           seconds: 15
                   - service: number.set_value
@@ -2098,7 +2098,7 @@ action:
                     then:
                       - service: button.press
                         target:
-                          entity_id: !input wake_button
+                          entity_id: "{{ wake_button }}"
                       - delay:
                           seconds: 15
                   - service: number.set_value
@@ -2227,7 +2227,7 @@ action:
                         then:
                           - service: input_datetime.set_datetime
                             target:
-                              entity_id: !input last_ramp_up_at
+                              entity_id: "{{ last_ramp_up_at }}"
                             data:
                               datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
                       # Fallback for installs without the timestamp
