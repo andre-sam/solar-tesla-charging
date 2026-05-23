@@ -238,8 +238,10 @@ entities:
 ```
 
 The controller re-evaluates every minute, so changes take effect
-within ~60 s. Cross-midnight windows are not supported: the end
-time must be later in the same day than the start time.
+within ~60 s. Cross-midnight windows are supported: if the end
+time is earlier than the start time (e.g. start 22:00, end 06:00)
+the window wraps midnight and is treated as open from start
+through end on the following day.
 
 ## Electrical setup
 
@@ -282,7 +284,9 @@ Behaviour:
 
 - While the charging window is open AND the Tesla SOC is below the
   threshold, the controller turns OFF any of the listed booleans
-  that are currently ON.
+  that are currently ON. If a notify service is configured, a
+  single "Loads Paused for Tesla" notification is sent listing
+  which loads were just paused.
 - The controller turns ON any of those booleans that are currently
   OFF in three situations:
   1. As soon as the Tesla reaches the effective SOC cap (the lower
@@ -377,7 +381,9 @@ Wire-up:
    at it.
 3. Done. The controller turns it ON at the start of a session and
    OFF when the contactor opens for 10 seconds, on HA restart
-   (when no session is live), or when the car is unplugged.
+   (when no session is live), when the car is unplugged, or when
+   the master enable toggle is turned off before the contactor
+   actually closed (e.g. during the 15 s wake delay).
 
 Leave the input empty to skip the lock; duplicate "Started"
 notifications are then possible if the start logic re-enters
@@ -421,8 +427,8 @@ execute alongside a slow ramp.
 | `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. Import covered by configured deferrable loads is treated as expected ramp-up overshoot and skipped. |
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
-| `disabled` | Enable toggle goes OFF mid-session | Notify. |
-| `unplugged` | Vehicle-connected goes OFF | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. |
+| `disabled` | Enable toggle goes OFF mid-session | Notify (if contactor closed). Also clears the session start lock if it was claimed but the contactor never closed. |
+| `unplugged` | Vehicle-connected goes OFF for 10 s | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. Also clears the session start lock if it was claimed but the contactor never closed. |
 | `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
 | `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session start lock so a future start can fire. |
 

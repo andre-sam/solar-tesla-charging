@@ -740,10 +740,15 @@ trigger:
 
   # Vehicle unplugged: restore any prioritize-loads the controller
   # disabled during the session, so loads like AC don't stay off
-  # after the car leaves the charger mid-window.
+  # after the car leaves the charger mid-window. Debounced 10 s to
+  # ride out brief connector flaps (integration reloads, Wi-Fi
+  # blips) that would otherwise restore loads mid-session and let
+  # them run for a tick before being paused again.
   - platform: state
     entity_id: !input vehicle_connected
     to: "off"
+    for:
+      seconds: 10
     id: unplugged
 
   # Window close: restore any prioritize-loads the controller
@@ -993,32 +998,46 @@ action:
       # ─────────────────────────────────────────────────────────────
       # UNPLUGGED: vehicle disconnected from the charger. Restore any
       # prioritize-loads (e.g. AC) the controller paused during the
-      # session so they don't stay off until window close. Runs
-      # regardless of enable_toggle so loads recover even if the
+      # session so they don't stay off until window close, and clear
+      # the session start lock if it was claimed but the contactor
+      # never closed (e.g. unplugged during the 15 s wake delay).
+      # Runs regardless of enable_toggle so loads recover even if the
       # controller was disabled while the car was still plugged in.
       # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'unplugged' }}"
-          - condition: template
-            value_template: "{{ prioritize_load_booleans | length > 0 }}"
         sequence:
-          - variables:
-              prioritize_off_loads: >
-                {% set ns = namespace(items=[]) %}
-                {% for e in prioritize_load_booleans %}
-                  {% if states(e) == 'off' %}
-                    {% set ns.items = ns.items + [e] %}
-                  {% endif %}
-                {% endfor %}
-                {{ ns.items }}
           - if:
               - condition: template
-                value_template: "{{ prioritize_off_loads | length > 0 }}"
+                value_template: "{{ prioritize_load_booleans | length > 0 }}"
             then:
-              - service: input_boolean.turn_on
+              - variables:
+                  prioritize_off_loads: >
+                    {% set ns = namespace(items=[]) %}
+                    {% for e in prioritize_load_booleans %}
+                      {% if states(e) == 'off' %}
+                        {% set ns.items = ns.items + [e] %}
+                      {% endif %}
+                    {% endfor %}
+                    {{ ns.items }}
+              - if:
+                  - condition: template
+                    value_template: "{{ prioritize_off_loads | length > 0 }}"
+                then:
+                  - service: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ prioritize_off_loads }}"
+          - if:
+              - condition: template
+                value_template: >
+                  {{ session_lock | length > 0
+                     and is_state(session_lock, 'on')
+                     and is_state(contactor_closed, 'off') }}
+            then:
+              - service: input_boolean.turn_off
                 target:
-                  entity_id: "{{ prioritize_off_loads }}"
+                  entity_id: "{{ session_lock }}"
 
       # DISABLED mid-session: confirm manual abort.
       # ─────────────────────────────────────────────────────────────
@@ -1038,6 +1057,28 @@ action:
                 Solar charging disabled while a session was running.
                 The controller will stop the charger on its next
                 evaluation.
+
+      # ─────────────────────────────────────────────────────────────
+      # DISABLED before contactor closed: clear the optional
+      # session_lock if it was claimed during the start branch but
+      # the contactor never closed (e.g. user toggled enable off
+      # during the 15 s wake delay). Without this, the lock stays
+      # ON indefinitely and blocks future starts until HA restart.
+      # ─────────────────────────────────────────────────────────────
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'disabled' }}"
+          - condition: state
+            entity_id: !input contactor_closed
+            state: "off"
+          - condition: template
+            value_template: >
+              {{ session_lock | length > 0
+                 and is_state(session_lock, 'on') }}
+        sequence:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: "{{ session_lock }}"
 
       # ─────────────────────────────────────────────────────────────
       # SESSION ENDED: contactor opened and stayed open 10 s.
@@ -1205,7 +1246,16 @@ action:
               now_time: "{{ now().strftime('%H:%M:%S') }}"
               window_start_str: "{{ states(window_start) }}"
               window_end_str: "{{ states(window_end) }}"
-              window_open: "{{ window_start_str <= now_time < window_end_str }}"
+              # Window is open when now is inside [start, end). If end
+              # is earlier than start the window wraps across midnight
+              # (e.g. start 22:00, end 06:00) and is open when now is
+              # at/after start OR before end.
+              window_open: >
+                {% if window_start_str <= window_end_str %}
+                  {{ window_start_str <= now_time < window_end_str }}
+                {% else %}
+                  {{ now_time >= window_start_str or now_time < window_end_str }}
+                {% endif %}
               flag_on: "{{ is_state(below_min_flag, 'on') }}"
               seconds_since_guard_trim: >
                 {% if last_guard_trim %}
@@ -1225,7 +1275,8 @@ action:
           # window, turn off the configured load booleans so the
           # Tesla gets priority on solar export. Filtered to loads
           # currently ON to keep the logbook clean. The window_close
-          # trigger restores them.
+          # and unplugged triggers, and the SOC-cap branch, restore
+          # them.
           - if:
               - condition: template
                 value_template: >
@@ -1249,6 +1300,17 @@ action:
                   - service: input_boolean.turn_off
                     target:
                       entity_id: "{{ prioritize_on_loads }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ notify_service | length > 0 }}"
+                    then:
+                      - service: "{{ notify_service }}"
+                        data:
+                          title: "⏸️ Loads Paused for Tesla"
+                          message: >
+                            Paused {{ prioritize_on_loads | join(', ') }}
+                            for Tesla priority (SOC {{ soc | round(0) }}%,
+                            threshold {{ prioritize_below_soc | round(0) }}%).
           - choose:
               # ── Branch 1: SOC cap reached ──────────────────────
               - conditions:
