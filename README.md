@@ -101,9 +101,6 @@ changes within seconds rather than at the next minute boundary.
 - Optional **boost session lock**: snapshots the Solcast boost at
   session start so the cap doesn't drop below live SOC mid-day
   if the forecast flips.
-- Optional **grid top-up safety net**: a deadline + floor pair
-  that falls back to fixed-current grid charging when prolonged
-  poor weather keeps the car under the floor.
 - Optional **home battery awareness**: while the house battery is
   below its reserve SOC, the Tesla controller treats export as
   zero so the inverter charges the battery first.
@@ -216,9 +213,6 @@ Optional:
 - A **home battery SOC sensor** plus a reserve threshold to make
   the controller yield to the house battery while it's below the
   reserve. See [Home battery awareness](#home-battery-awareness-optional).
-- An **`input_datetime`** (time only) plus a floor SOC to enable a
-  grid top-up safety net for prolonged poor weather. See
-  [Grid top-up safety net](#grid-top-up-safety-net-optional).
 - **Solcast PV Forecast** daily-total sensors for the forecast boost.
   Pick today, tomorrow, and as many of `day_3` to `day_7` as you
   want (the lookahead input chooses how far ahead to inspect):
@@ -515,32 +509,6 @@ multiple times without meaningful progress. The
 and grid-top-up notifications when SOC didn't move by at least
 that much during the session. Set to 0 to always notify.
 
-## Grid top-up safety net (optional)
-
-For prolonged poor weather, you can configure a deadline + floor
-so the controller falls back to grid charging:
-
-| Input | Role |
-|---|---|
-| **Minimum SOC floor (%)** | If SOC is below this at the deadline, start a grid session. Set to 0 to disable. |
-| **Minimum SOC deadline** (`input_datetime`, time only) | When (within the charging window) to start the top-up if the car is still below the floor. |
-| **Grid top-up current (A)** | Fixed current used during top-up (e.g. 8 A ≈ 1.8 kW on 230 V single-phase). |
-
-Behaviour:
-
-- Branch 5b starts a session at the configured top-up current
-  even when there is no solar export. Notifies "Grid Top-Up
-  Started".
-- Branch 5c stops the session as soon as SOC reaches the floor
-  (without waiting for the effective SOC cap or grace timer).
-  Notifies "Grid Top-Up Complete" (subject to the gain dedupe
-  above).
-- Honours cross-midnight charging windows.
-- Capped at the Tesla app limit; never charges above it.
-
-Leave the deadline input or the floor empty (`0`) to disable the
-safety net entirely. The default behaviour is unchanged.
-
 ## Home battery awareness (optional)
 
 On installs with a hybrid inverter and a house battery (Powerwall,
@@ -591,7 +559,7 @@ execute alongside a slow ramp.
 
 | Trigger id | Source | Branch behaviour |
 |---|---|---|
-| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic, including the mid-session wall-connector fault stop and the grid top-up start/stop. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Adds any configured deferrable load consumption (capped at the solar-fed portion) to the available export budget. Treats available export as zero while a configured home battery is below its reserve. Skipped when Tesla Fleet API entities are unavailable. |
+| `tick` | HA start, every minute, state changes on grid/charger/SOC | Main ramp / start / SOC-cap / window-end logic, including the mid-session wall-connector fault stop. Pauses prioritize-loads when SOC is low during the window, and restores them as soon as the SOC cap is reached. Adds any configured deferrable load consumption (capped at the solar-fed portion) to the available export budget. Treats available export as zero while a configured home battery is below its reserve. Skipped when Tesla Fleet API entities are unavailable. |
 | `grace_expired` | Below-minimum flag held ON for the grace period | Stop the session, clear locks, and notify (subject to the SOC-gain dedupe). |
 | `ha_start_reconcile` | HA start | Clear stale stateful flags (below-minimum tracker, session start lock, boost session lock) if no session is running. |
 | `import_spike` | Grid import crosses above `import_threshold_w` | Compute and apply a current trim if import exceeds the threshold. Import covered by configured deferrable loads is treated as expected ramp-up overshoot and skipped. The numeric-state edge trigger replaces the old per-change trigger so sub-threshold meter chatter doesn't fill the parallel-execution slot pool. |
@@ -605,9 +573,9 @@ execute alongside a slow ramp.
 The import trim only ever ramps current down; only the per-minute
 `tick` branch can stop or restart a session, so there's no risk of
 the two branches fighting each other. Branch 5 ("Start / resume")
-and Branch 5b ("Grid top-up start") both verify the contactor
-actually closes after the switch is turned on, and roll back the
-locks plus suppress the "Started" notification if it doesn't.
+verifies the contactor actually closes after the switch is turned
+on, and rolls back the locks plus suppresses the "Started"
+notification if it doesn't.
 
 ## Troubleshooting
 
