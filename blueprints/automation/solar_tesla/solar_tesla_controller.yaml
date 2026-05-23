@@ -613,6 +613,20 @@ blueprint:
         entity:
           domain: input_boolean
 
+    session_start_soc:
+      name: Session start SOC tracker (optional)
+      description: >
+        input_number (0 to 100, step 1) that the controller writes
+        to at the start of each charging session, so end-of-session
+        notifications can include a "charged from X% (+Y%)" summary.
+        The controller WRITES this entity each time a session starts;
+        you don't interact with it directly. Leave empty to skip the
+        summary suffix on stop notifications.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+
 mode: parallel
 max: 10
 max_exceeded: silent
@@ -664,6 +678,7 @@ variables:
   prioritize_below_soc: !input prioritize_below_soc
   deferrable_load_sensors: !input deferrable_load_sensors
   session_lock: !input session_lock
+  session_start_soc: !input session_start_soc
 
 trigger:
   # Main controller evaluator: runs every minute, on HA start, and on
@@ -728,13 +743,17 @@ trigger:
   - platform: state
     entity_id: !input vehicle_connected
     to: "on"
+    for:
+      seconds: 2
     id: plugged_in
   - platform: state
     entity_id: !input enable_toggle
+    from: "off"
     to: "on"
     id: enabled
   - platform: state
     entity_id: !input enable_toggle
+    from: "on"
     to: "off"
     id: disabled
 
@@ -799,6 +818,16 @@ action:
               - condition: template
                 value_template: "{{ notify_service | length > 0 }}"
             then:
+              - variables:
+                  now_soc_val: "{{ states(battery_soc) | float(0) }}"
+                  start_soc_val: >
+                    {{ states(session_start_soc) | float(0)
+                       if session_start_soc else 0 }}
+                  delta_suffix: >
+                    {%- if start_soc_val > 0 and now_soc_val > start_soc_val %}
+                    Charged from {{ start_soc_val | round(0) | int }}%
+                    (+{{ (now_soc_val - start_soc_val) | round(0) | int }}%).
+                    {%- endif %}
               - service: "{{ notify_service }}"
                 data:
                   title: "☁️ Solar Session Ended"
@@ -807,6 +836,7 @@ action:
                     {{ (stop_grace_seconds | int // 60) }} min.
                     Charging stopped at
                     {{ states(battery_soc) | round(0) }}%.
+                    {{ delta_suffix }}
 
       # ─────────────────────────────────────────────────────────────
       # HA START RECONCILE: clear any stale stateful flags if no
@@ -1039,7 +1069,10 @@ action:
                 target:
                   entity_id: "{{ session_lock }}"
 
-      # DISABLED mid-session: confirm manual abort.
+      # DISABLED mid-session: stop the charger. The per-minute tick
+      # branch is gated on enable_toggle == on, so without an
+      # explicit stop here a running session would continue until
+      # the car-side limit, an unplug, or a manual switch-off.
       # ─────────────────────────────────────────────────────────────
       - conditions:
           - condition: template
@@ -1047,16 +1080,55 @@ action:
           - condition: state
             entity_id: !input contactor_closed
             state: "on"
-          - condition: template
-            value_template: "{{ notify_service | length > 0 }}"
         sequence:
-          - service: "{{ notify_service }}"
-            data:
-              title: "⏹️ Solar Charging Disabled"
-              message: >
-                Solar charging disabled while a session was running.
-                The controller will stop the charger on its next
-                evaluation.
+          - service: switch.turn_off
+            target:
+              entity_id: !input charge_switch
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input below_min_flag
+          # Restore any prioritize-loads the controller paused.
+          - if:
+              - condition: template
+                value_template: "{{ prioritize_load_booleans | length > 0 }}"
+            then:
+              - variables:
+                  prioritize_off_loads: >
+                    {% set ns = namespace(items=[]) %}
+                    {% for e in prioritize_load_booleans %}
+                      {% if states(e) == 'off' %}
+                        {% set ns.items = ns.items + [e] %}
+                      {% endif %}
+                    {% endfor %}
+                    {{ ns.items }}
+              - if:
+                  - condition: template
+                    value_template: "{{ prioritize_off_loads | length > 0 }}"
+                then:
+                  - service: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ prioritize_off_loads }}"
+          - if:
+              - condition: template
+                value_template: "{{ notify_service | length > 0 }}"
+            then:
+              - variables:
+                  now_soc_val: "{{ states(battery_soc) | float(0) }}"
+                  start_soc_val: >
+                    {{ states(session_start_soc) | float(0)
+                       if session_start_soc else 0 }}
+                  delta_suffix: >
+                    {%- if start_soc_val > 0 and now_soc_val > start_soc_val %}
+                    Charged from {{ start_soc_val | round(0) | int }}%
+                    (+{{ (now_soc_val - start_soc_val) | round(0) | int }}%).
+                    {%- endif %}
+              - service: "{{ notify_service }}"
+                data:
+                  title: "⏹️ Solar Charging Stopped"
+                  message: >
+                    Master toggle disabled mid-session. Charging
+                    stopped at {{ now_soc_val | round(0) | int }}%.
+                    {{ delta_suffix }}
 
       # ─────────────────────────────────────────────────────────────
       # DISABLED before contactor closed: clear the optional
@@ -1271,6 +1343,17 @@ action:
               guard_trim_recent: >
                 {{ seconds_since_guard_trim | float(99999)
                    < post_trim_fast_recovery_seconds }}
+              # Start-SOC tracker for end-of-session summaries.
+              # Reads the optional helper; falls back to 0 when not
+              # configured or unset.
+              start_soc_val: >
+                {{ states(session_start_soc) | float(0)
+                   if session_start_soc else 0 }}
+              delta_suffix: >
+                {%- if start_soc_val > 0 and soc > start_soc_val %}
+                Charged from {{ start_soc_val | round(0) | int }}%
+                (+{{ (soc - start_soc_val) | round(0) | int }}%).
+                {%- endif %}
           # Prioritize Tesla: if SOC is low during the charging
           # window, turn off the configured load booleans so the
           # Tesla gets priority on solar export. Filtered to loads
@@ -1359,6 +1442,7 @@ action:
                             {{ effective_limit | round(0) }}%{% if boost_active %},
                             forecast boost{% endif %}).
                             Solar charging stopped.
+                            {{ delta_suffix }}
 
               # ── Branch 2: Hard stop at window end (optional) ───
               - conditions:
@@ -1384,6 +1468,7 @@ action:
                           message: >
                             Charging window ended ({{ window_start_str }} to {{ window_end_str }}).
                             Solar session stopped at {{ soc | round(0) }}%.
+                            {{ delta_suffix }}
 
               # Branch 3: Below minimum, hold at min, raise flag.
               # The grace_expired trigger ends the session if the
@@ -1454,6 +1539,19 @@ action:
                       - service: input_boolean.turn_on
                         target:
                           entity_id: "{{ session_lock }}"
+                  # Capture this session's starting SOC for the
+                  # end-of-session summary suffix. Overwritten on
+                  # each Branch 5 entry, so the suffix reports
+                  # "charged since last contactor close".
+                  - if:
+                      - condition: template
+                        value_template: "{{ session_start_soc | length > 0 }}"
+                    then:
+                      - service: input_number.set_value
+                        target:
+                          entity_id: "{{ session_start_soc }}"
+                        data:
+                          value: "{{ soc | round(0, 'floor') | int }}"
                   # Always try to wake the car on a restart when a
                   # wake button is provided; covers the case where
                   # status is asleep or unknown (which would

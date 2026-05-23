@@ -152,6 +152,13 @@ Optional:
 - One or more **power sensors** (W or kW) for deferrable loads
   (e.g. `sensor.myenergi_eddi_internal_load_ct1`) that you'd
   rather have the Tesla outbid. See [Deferrable load awareness](#deferrable-load-awareness-optional).
+- An **`input_number`** (0 to 100, step 1) as a session start SOC
+  tracker (e.g. `input_number.solar_charging_start_soc`). The
+  controller writes the car's SOC to it at the start of each
+  charging session and reads it back at session end to append a
+  "charged from X% (+Y%)" summary to stop notifications. You don't
+  interact with it directly. Leave the input empty to skip the
+  summary suffix.
 - **Solcast PV Forecast** daily-total sensors for the forecast boost.
   Pick today, tomorrow, and as many of `day_3` to `day_7` as you
   want (the lookahead input chooses how far ahead to inspect):
@@ -427,7 +434,7 @@ execute alongside a slow ramp.
 | `import_spike` | Any change to the grid import sensor | Compute and apply a current trim if import exceeds the threshold. Import covered by configured deferrable loads is treated as expected ramp-up overshoot and skipped. |
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
-| `disabled` | Enable toggle goes OFF mid-session | Notify (if contactor closed). Also clears the session start lock if it was claimed but the contactor never closed. |
+| `disabled` | Enable toggle goes OFF mid-session | Stop the charger (turn off `charge_switch`, clear `below_min_flag`, restore prioritize-loads) and notify. Also clears the session start lock if the contactor never closed. |
 | `unplugged` | Vehicle-connected goes OFF for 10 s | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. Also clears the session start lock if it was claimed but the contactor never closed. |
 | `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
 | `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session start lock so a future start can fire. |
