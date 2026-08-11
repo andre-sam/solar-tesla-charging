@@ -1691,6 +1691,47 @@ action:
               mid_session_fault: >
                 {{ is_state(contactor_closed, 'on')
                    and status_text in blocking_statuses }}
+              # ── Stale session-lock self-heal ────────────────
+              # Branch 5 claims session_lock (and boost_session_lock)
+              # BEFORE the wake delay / start-verify wait, then rolls
+              # them back if the contactor never closes. If that run
+              # is interrupted mid-flight (e.g. HA/automation reload
+              # while the wait was in progress) the rollback never
+              # executes and the lock is stranded ON, permanently
+              # blocking future starts — the only other clears are
+              # tied to specific events (unplug, disable, session end)
+              # that may never fire. Treat the lock as stale once it's
+              # been ON for longer than the worst-case legitimate
+              # start sequence could ever take, and clear it here so
+              # this same tick can still fall through to Branch 5.
+              session_lock_age_s: >
+                {% if session_lock and is_state(session_lock, 'on') %}
+                  {{ (now() - states[session_lock].last_changed).total_seconds() }}
+                {% else %}
+                  0
+                {% endif %}
+              session_lock_stale: >
+                {{ session_lock | length > 0
+                   and is_state(session_lock, 'on')
+                   and is_state(contactor_closed, 'off')
+                   and session_lock_age_s | float(0)
+                      > ((start_verify_seconds | int) + 60) }}
+          - if:
+              - condition: template
+                value_template: "{{ session_lock_stale }}"
+            then:
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ session_lock }}"
+              - if:
+                  - condition: template
+                    value_template: >
+                      {{ boost_session_lock | length > 0
+                         and is_state(boost_session_lock, 'on') }}
+                then:
+                  - service: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ boost_session_lock }}"
           # Prioritize Tesla: if SOC is low during the charging
           # window, turn off the configured load booleans so the
           # Tesla gets priority on solar export. Filtered to loads
