@@ -1647,11 +1647,33 @@ action:
                 {% else %}
                   99999
                 {% endif %}
+              # ── Grid-data freshness guard ───────────────────
+              # wall_connector_power is one of the tick triggers, so
+              # a rising car draw re-evaluates the controller almost
+              # instantly. If the grid import/export sensors haven't
+              # refreshed since that draw increase, effective_export_w
+              # (grid + wall power added back) double-counts the
+              # amps the car just picked up, inflating available_amps
+              # and triggering yet another ramp-up before the meter
+              # ever reflects the previous one — a runaway ratchet
+              # straight to max_charge_amps, followed by a hard
+              # import-spike trim once the meter catches up. Block
+              # ramp-ups while the wall connector's own reading is
+              # meaningfully newer than the grid readings so each
+              # step is judged against grid data that actually
+              # reflects it.
+              grid_data_fresh: >
+                {% set grid_ts = [states[grid_import_power].last_updated,
+                                   states[grid_export_power_negative].last_updated]
+                                  | max %}
+                {% set wall_ts = states[wall_connector_power].last_updated %}
+                {{ (wall_ts - grid_ts).total_seconds() <= 5 }}
               ramp_up_allowed: >
-                {{ guard_trim_recent
-                   or (last_ramp_up_at | length == 0)
-                   or (seconds_since_ramp_up | float(99999)
-                       >= stability_delay_seconds) }}
+                {{ (guard_trim_recent
+                    or (last_ramp_up_at | length == 0)
+                    or (seconds_since_ramp_up | float(99999)
+                        >= stability_delay_seconds))
+                   and grid_data_fresh }}
               # ── Notification gain gate ──────────────────────
               # Suppress session-end notifications when the
               # session didn't move SOC by at least this much.
