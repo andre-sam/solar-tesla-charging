@@ -342,8 +342,8 @@ blueprint:
         How long to pause between successive +1 A ramp-up steps when
         solar is steadily climbing. Longer = gentler on the car and
         contactor; shorter = aggressive tracking of rising solar.
-        Skipped automatically right after an import-spike trim so
-        recovery is fast.
+        The first ramp-up after an import-spike trim skips this delay
+        so recovery is fast.
       default: 60
       selector:
         number:
@@ -352,14 +352,37 @@ blueprint:
           step: 5
           unit_of_measurement: s
 
+    min_amp_step:
+      name: Minimum charge-current change (A)
+      description: >
+        Write deadband. The controller only sends a new charge current
+        to the car when it differs from the present setting by at
+        least this many amps, so it stops spending Tesla API commands
+        chasing 1 A meter jitter around a stable operating point.
+        1 (default) = write on every 1 A change, as before. 2-3
+        markedly reduces API usage for a few hundred watts of tracking
+        accuracy — worth it if you are near a Fleet API quota. Always
+        bypassed for drops to the minimum current and for reductions
+        made while actually importing, so the safety and
+        below-minimum paths are unaffected.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 5
+          step: 1
+          unit_of_measurement: A
+
     post_trim_fast_recovery_seconds:
       name: Post-trim fast-recovery window (s)
       description: >
         After a brief import spike (kettle, oven) trims the charge
-        current down, the controller ignores the stability delay for
-        this many seconds. Lets the session recover quickly instead of
-        being pinned at the post-trim current. Only effective when the
-        'Last import-spike trim' helper is configured.
+        current down, the controller lets the NEXT ramp-up skip the
+        stability delay, up to this many seconds after the trim. Only
+        the first ramp-up is exempt — once it has happened the normal
+        stability delay applies again, so a busy meter cannot leave
+        the rate limiter permanently switched off. Only effective when
+        the 'Last import-spike trim' helper is configured.
       default: 180
       selector:
         number:
@@ -829,6 +852,7 @@ variables:
   boost_bad_day_max_kwh: !input boost_bad_day_max_kwh
   stability_delay_seconds: !input stability_delay_seconds
   post_trim_fast_recovery_seconds: !input post_trim_fast_recovery_seconds
+  min_amp_step: !input min_amp_step
   stop_grace_seconds: !input stop_grace_seconds
   import_threshold_w: !input import_threshold_w
   import_safety_margin_amps: !input import_safety_margin_amps
@@ -1102,10 +1126,14 @@ action:
           - condition: template
             value_template: >
               {{ states(grid_import_power) | float(0) > import_threshold_w }}
+          # Defaults are mandatory here: unlike the tick branch, this
+          # branch has no bad-state gate, and the Tesla number entity
+          # goes unavailable whenever the car sleeps or the API drops.
+          # A bare `| int` would raise on every grid-import update.
           - condition: template
             value_template: >
-              {{ (states(charge_current_number) | int)
-                 > (min_charge_amps_cfg | int) }}
+              {{ (states(charge_current_number) | int(0))
+                 > (min_charge_amps_cfg | int(1)) }}
         sequence:
           - variables:
               import_w: "{{ states(grid_import_power) | float(0) }}"
@@ -1486,10 +1514,18 @@ action:
               # Effective export (W) adds back the charger's own draw.
               # Net grid = import (>=0) + export_negative (<=0).
               # Negative net = exporting; flip sign so grid_export_w
-              # is positive when exporting.
+              # is positive when exporting. When a single signed meter
+              # is pointed at both inputs, the two readings are the
+              # same register and must not be summed (that would double
+              # the apparent surplus).
               grid_export_w: >
-                {{ -((states(grid_import_power) | float(0))
-                     + (states(grid_export_power_negative) | float(0))) }}
+                {% set imp = states(grid_import_power) | float(0) %}
+                {% set exp = states(grid_export_power_negative) | float(0) %}
+                {% if grid_import_power == grid_export_power_negative %}
+                  {{ -exp }}
+                {% else %}
+                  {{ -(imp + exp) }}
+                {% endif %}
               # Deferrable loads (solar diverters etc.) that back off
               # as the Tesla draws more. Sum positive readings, honour
               # W vs kW per sensor, skip any unavailable entity.
@@ -1658,9 +1694,6 @@ action:
                 {% else %}
                   99999
                 {% endif %}
-              guard_trim_recent: >
-                {{ seconds_since_guard_trim | float(99999)
-                   < post_trim_fast_recovery_seconds }}
               # Start-SOC tracker for end-of-session summaries.
               # Reads the optional helper; falls back to 0 when not
               # configured or unset.
@@ -1696,6 +1729,15 @@ action:
                 {% else %}
                   99999
                 {% endif %}
+              # Exempt only the FIRST ramp-up after a trim: once one
+              # has happened the trim is older than it, so a meter
+              # that trims constantly can no longer hold the ramp-up
+              # rate limiter permanently open.
+              guard_trim_recent: >
+                {{ (seconds_since_guard_trim | float(99999))
+                     < post_trim_fast_recovery_seconds
+                   and (seconds_since_guard_trim | float(99999))
+                     < (seconds_since_ramp_up | float(99999)) }}
               # ── Grid-data freshness guard ───────────────────
               # wall_connector_power is one of the tick triggers, so
               # a rising car draw re-evaluates the controller almost
@@ -2176,8 +2218,22 @@ action:
                         {% endif %}
                       is_ramp_up: >
                         {{ (target_amps | int) > (current_set_amps | int) }}
+                      amp_delta: >
+                        {{ (target_amps | int) - (current_set_amps | int) }}
+                      # Deadband: every write costs a Tesla API command,
+                      # so ignore changes smaller than min_amp_step.
+                      # Exempt dropping to the floor (Branch 3 and the
+                      # grace timer depend on reaching it) and any
+                      # reduction made while actually importing.
+                      step_big_enough: >
+                        {{ (amp_delta | int | abs) >= (min_amp_step | int(1))
+                           or (target_amps | int) == (min_charge_amps | int)
+                           or ((amp_delta | int) < 0
+                               and (states(grid_import_power) | float(0))
+                                   > (import_threshold_w | float(0))) }}
                       should_write: >
                         {{ target_amps | int != (current_set_amps | int)
+                           and step_big_enough
                            and (not is_ramp_up or ramp_up_allowed) }}
                   - if:
                       - condition: template

@@ -327,8 +327,9 @@ or above 0 when importing**. They are combined additively inside
 the controller so two-counter meters (Enphase-style: separate
 unidirectional import and export registers) work correctly. If your
 meter only exposes a single signed net sensor, point both controller
-inputs at that same entity. The math still works because
-`net + 0 == net`.
+inputs at that same entity — the controller detects that the two
+inputs are the same entity and reads the register once instead of
+summing it with itself.
 
 ## Load prioritisation (optional)
 
@@ -543,9 +544,39 @@ chatter and slightly higher chance of brief grid imports:
 |---|---|---|---|
 | `export_threshold_amps` | 1 | 0 | Removes the constant ~230 W (1-ph) / 690 W (3-ph) export buffer. |
 | `stability_delay_seconds` | 60 | 15 to 30 | Time the controller waits between ramp-up steps. |
-| `post_trim_fast_recovery_seconds` | 180 | 300 to 600 | After an import-spike trim, the stability delay is skipped for this long, so the controller keeps tracking solar without the per-step pause through a cloud event. |
+| `post_trim_fast_recovery_seconds` | 180 | 300 to 600 | After an import-spike trim, the next ramp-up skips the stability delay if it happens within this long, so the controller recovers quickly from a cloud event. |
 | `import_threshold_w` | 50 | 25 to 30 | Noise floor for the import-spike trim. Lower = reacts to smaller imports. |
 | `fast_ramp_headroom_amps` | 3 | 2 | When available export is at least this many amps above the current setpoint, jump directly to target instead of the +1 A per minute cap. |
+| `min_amp_step` | 1 | 1 | Write deadband; see below. 1 tracks solar most closely. |
+
+### Staying inside a Fleet API quota
+
+Every charge-current change is a Tesla API command, and on a
+fast-updating meter the controller can spend 90-100 of them per
+hour chasing jitter around a stable operating point.
+`min_amp_step` is the effective lever: it suppresses writes
+smaller than the given number of amps, while still allowing drops
+to the minimum current and any reduction taken during a real grid
+import, so neither the below-minimum logic nor the import
+protection is weakened.
+
+Simulated over a 4-hour window against a 4 kW-to-8 kW PV curve
+with cloud and appliance noise:
+
+| `min_amp_step` | Commands/hour | Energy to car |
+|---|---|---|
+| 1 (default, previous behaviour) | ~96 | baseline |
+| 2 | ~60 (−37 %) | +0.5 % (no measurable loss) |
+| 3 | ~54 (−44 %) | −1.9 % |
+| 4 | ~43 (−56 %) | −7.9 % |
+| 5 | ~34 (−64 %) | −14.1 % |
+
+**2 is essentially free** — the amps it declines to chase are
+recovered on the next larger step. Go to 3 if you need more
+headroom; beyond that you start leaving real solar on the table.
+Note that raising `export_threshold_amps` or `import_threshold_w`
+does *not* reduce command count, and a larger export buffer
+measurably increases it.
 
 If you also have a fine-grained PV diverter (myenergi Eddi or
 similar) on the same circuit, leave it to handle the residual
