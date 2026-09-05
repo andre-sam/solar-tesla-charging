@@ -616,6 +616,21 @@ blueprint:
           domain: input_boolean
           multiple: true
 
+    prioritize_pause_store:
+      name: Paused-loads memory helper (optional)
+      description: >
+        STRONGLY RECOMMENDED when the load-priority list above is
+        used. An `input_text` helper (create it with min 0 and
+        max 255) in which the controller records which loads IT
+        paused. Only those are turned back on later, so a load you
+        switched off yourself stays off. Without this helper the
+        controller restores every listed load it finds off — which
+        silently re-enables your own manual off.
+      default: ""
+      selector:
+        entity:
+          domain: input_text
+
     prioritize_below_soc:
       name: Prioritize Tesla below SOC (%)
       description: >
@@ -821,6 +836,7 @@ variables:
   window_start: !input window_start
   window_end: !input window_end
   prioritize_load_booleans: !input prioritize_load_booleans
+  prioritize_pause_store: !input prioritize_pause_store
   prioritize_below_soc: !input prioritize_below_soc
   deferrable_load_sensors: !input deferrable_load_sensors
   session_lock: !input session_lock
@@ -1198,7 +1214,7 @@ action:
                 Window: {{ states(window_start) }} to {{ states(window_end) }}.
 
       # ─────────────────────────────────────────────────────────────
-      # WINDOW CLOSE: restore prioritize-loads that are currently off.
+      # WINDOW CLOSE: restore prioritize-loads that WE paused.
       # Runs regardless of enable_toggle so loads never get stuck off
       # if the user disabled the controller mid-window.
       - conditions:
@@ -1209,9 +1225,11 @@ action:
         sequence:
           - variables:
               prioritize_off_loads: >
+                {% set raw = states(prioritize_pause_store) if prioritize_pause_store | length > 0 else '' %}
+                {% set tracked = raw.split(',') if raw not in ['unknown', 'unavailable'] else [] %}
                 {% set ns = namespace(items=[]) %}
                 {% for e in prioritize_load_booleans %}
-                  {% if states(e) == 'off' %}
+                  {% if states(e) == 'off' and (prioritize_pause_store | length == 0 or e in tracked) %}
                     {% set ns.items = ns.items + [e] %}
                   {% endif %}
                 {% endfor %}
@@ -1223,6 +1241,15 @@ action:
               - service: input_boolean.turn_on
                 target:
                   entity_id: "{{ prioritize_off_loads }}"
+          - if:
+              - condition: template
+                value_template: "{{ prioritize_pause_store | length > 0 }}"
+            then:
+              - service: input_text.set_value
+                target:
+                  entity_id: "{{ prioritize_pause_store }}"
+                data:
+                  value: ""
 
       # ─────────────────────────────────────────────────────────────
       # UNPLUGGED: vehicle disconnected from the charger. Restore any
@@ -1243,9 +1270,11 @@ action:
             then:
               - variables:
                   prioritize_off_loads: >
+                    {% set raw = states(prioritize_pause_store) if prioritize_pause_store | length > 0 else '' %}
+                    {% set tracked = raw.split(',') if raw not in ['unknown', 'unavailable'] else [] %}
                     {% set ns = namespace(items=[]) %}
                     {% for e in prioritize_load_booleans %}
-                      {% if states(e) == 'off' %}
+                      {% if states(e) == 'off' and (prioritize_pause_store | length == 0 or e in tracked) %}
                         {% set ns.items = ns.items + [e] %}
                       {% endif %}
                     {% endfor %}
@@ -1257,6 +1286,15 @@ action:
                   - service: input_boolean.turn_on
                     target:
                       entity_id: "{{ prioritize_off_loads }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ prioritize_pause_store | length > 0 }}"
+                then:
+                  - service: input_text.set_value
+                    target:
+                      entity_id: "{{ prioritize_pause_store }}"
+                    data:
+                      value: ""
           - if:
               - condition: template
                 value_template: >
@@ -1302,9 +1340,11 @@ action:
             then:
               - variables:
                   prioritize_off_loads: >
+                    {% set raw = states(prioritize_pause_store) if prioritize_pause_store | length > 0 else '' %}
+                    {% set tracked = raw.split(',') if raw not in ['unknown', 'unavailable'] else [] %}
                     {% set ns = namespace(items=[]) %}
                     {% for e in prioritize_load_booleans %}
-                      {% if states(e) == 'off' %}
+                      {% if states(e) == 'off' and (prioritize_pause_store | length == 0 or e in tracked) %}
                         {% set ns.items = ns.items + [e] %}
                       {% endif %}
                     {% endfor %}
@@ -1316,6 +1356,15 @@ action:
                   - service: input_boolean.turn_on
                     target:
                       entity_id: "{{ prioritize_off_loads }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ prioritize_pause_store | length > 0 }}"
+                then:
+                  - service: input_text.set_value
+                    target:
+                      entity_id: "{{ prioritize_pause_store }}"
+                    data:
+                      value: ""
           - if:
               - condition: template
                 value_template: "{{ notify_service | length > 0 }}"
@@ -1735,9 +1784,10 @@ action:
           # Prioritize Tesla: if SOC is low during the charging
           # window, turn off the configured load booleans so the
           # Tesla gets priority on solar export. Filtered to loads
-          # currently ON to keep the logbook clean. The window_close
-          # and unplugged triggers, and the SOC-cap branch, restore
-          # them.
+          # currently ON to keep the logbook clean, and recorded in
+          # the optional store helper so only loads WE switched off
+          # get switched back on. The window_close and unplugged
+          # triggers, and the SOC-cap branch, restore them.
           - if:
               - condition: template
                 value_template: >
@@ -1761,6 +1811,18 @@ action:
                   - service: input_boolean.turn_off
                     target:
                       entity_id: "{{ prioritize_on_loads }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ prioritize_pause_store | length > 0 }}"
+                    then:
+                      - service: input_text.set_value
+                        target:
+                          entity_id: "{{ prioritize_pause_store }}"
+                        data:
+                          value: >
+                            {% set raw = states(prioritize_pause_store) %}
+                            {% set tracked = raw.split(',') if raw not in ['unknown', 'unavailable', ''] else [] %}
+                            {{ (tracked + prioritize_on_loads) | unique | join(',') }}
                   - if:
                       - condition: template
                         value_template: "{{ notify_service | length > 0 }}"
@@ -1839,9 +1901,11 @@ action:
                     then:
                       - variables:
                           prioritize_off_loads: >
+                            {% set raw = states(prioritize_pause_store) if prioritize_pause_store | length > 0 else '' %}
+                            {% set tracked = raw.split(',') if raw not in ['unknown', 'unavailable'] else [] %}
                             {% set ns = namespace(items=[]) %}
                             {% for e in prioritize_load_booleans %}
-                              {% if states(e) == 'off' %}
+                              {% if states(e) == 'off' and (prioritize_pause_store | length == 0 or e in tracked) %}
                                 {% set ns.items = ns.items + [e] %}
                               {% endif %}
                             {% endfor %}
@@ -1853,6 +1917,15 @@ action:
                           - service: input_boolean.turn_on
                             target:
                               entity_id: "{{ prioritize_off_loads }}"
+                      - if:
+                          - condition: template
+                            value_template: "{{ prioritize_pause_store | length > 0 }}"
+                        then:
+                          - service: input_text.set_value
+                            target:
+                              entity_id: "{{ prioritize_pause_store }}"
+                            data:
+                              value: ""
                   - if:
                       - condition: template
                         value_template: >

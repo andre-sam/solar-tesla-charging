@@ -341,15 +341,21 @@ when its boolean is ON. Then point the controller's **Prioritize
 Tesla over these loads** input at those booleans and pick a SOC
 threshold (default 40 %).
 
+Also create an `input_text` helper (min 0, max 255) and point the
+**Paused-loads memory helper** input at it. The controller records
+there which loads *it* paused, and restores only those. Without it
+the controller restores every listed boolean it finds off — which
+silently re-enables a load you switched off yourself.
+
 Behaviour:
 
 - While the charging window is open AND the Tesla SOC is below the
   threshold, the controller turns OFF any of the listed booleans
-  that are currently ON. If a notify service is configured, a
-  single "Loads Paused for Tesla" notification is sent listing
-  which loads were just paused.
-- The controller turns ON any of those booleans that are currently
-  OFF in three situations:
+  that are currently ON, and appends them to the memory helper. If
+  a notify service is configured, a single "Loads Paused for Tesla"
+  notification is sent listing which loads were just paused.
+- The controller turns ON the booleans recorded in the memory
+  helper (and clears it) in three situations:
   1. As soon as the Tesla reaches the effective SOC cap (the lower
      of the local Preferred / Boost cap and the Tesla app limit).
      Restoring at this point means the loads come back online as
@@ -366,11 +372,10 @@ Behaviour:
 - The controller only writes to a boolean when its state would
   actually change, so the logbook stays clean even though the
   controller re-evaluates every minute.
-- The restore turns each boolean back ON unconditionally; the
-  controller doesn't track *why* it was off. If you have your own
-  reason to keep one of those automations paused, gate it from a
-  different switch so the controller's restore can't undo your
-  intent.
+- With the memory helper configured, a boolean you switched off
+  yourself is never restored by the controller. Without it, the
+  restore is unconditional and will undo your manual off — in that
+  case gate your own intent from a different switch.
 
 Leave the input empty to disable the feature entirely.
 
@@ -566,8 +571,8 @@ execute alongside a slow ramp.
 | `plugged_in` | Vehicle-connected goes ON | Notify; message depends on the enable toggle. |
 | `enabled` | Enable toggle goes ON while plugged in | Notify. |
 | `disabled` | Enable toggle goes OFF mid-session | Stop the charger (turn off `charge_switch`, clear `below_min_flag`, restore prioritize-loads) and notify. Also clears the session and boost locks if the contactor never closed. |
-| `unplugged` | Vehicle-connected goes OFF for 10 s | Restore any prioritize-loads currently off so loads like AC come back on as soon as the car leaves the charger. Also clears the session and boost locks if claimed but the contactor never closed. |
-| `window_close` | Time-of-day equal to the window end helper | Restore any prioritize-loads currently off. |
+| `unplugged` | Vehicle-connected goes OFF for 10 s | Restore the prioritize-loads recorded in the paused-loads memory helper so loads like AC come back on as soon as the car leaves the charger. Also clears the session and boost locks if claimed but the contactor never closed. |
+| `window_close` | Time-of-day equal to the window end helper | Restore the prioritize-loads recorded in the paused-loads memory helper. |
 | `session_ended` | Contactor goes from ON to OFF for 10 s | Clear the session and boost locks so a future start can fire. |
 
 The import trim only ever ramps current down; only the per-minute
